@@ -1,0 +1,11 @@
+{
+  "id": "cyberpunk",
+  "name": "Cyberpunk",
+  "description": "High-contrast city-night palette for focused writing.",
+  "isBuiltIn": false,
+  "seedColor": "#00E5FF",
+  "surfaceTint": "#FF4FD8",
+  "backgroundTop": "#13081F",
+  "backgroundBottom": "#2A0E36",
+  "accent": "#F7C948"
+}

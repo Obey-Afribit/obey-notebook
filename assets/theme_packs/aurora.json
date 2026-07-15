@@ -1,0 +1,11 @@
+{
+  "id": "aurora",
+  "name": "Aurora",
+  "description": "Iridescent gradients and ambient glows.",
+  "isBuiltIn": true,
+  "seedColor": "#3DD6D0",
+  "surfaceTint": "#66E2FF",
+  "backgroundTop": "#081126",
+  "backgroundBottom": "#133B5C",
+  "accent": "#8E7CFF"
+}

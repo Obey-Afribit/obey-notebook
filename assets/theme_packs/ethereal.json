@@ -1,0 +1,11 @@
+{
+  "id": "ethereal",
+  "name": "Ethereal",
+  "description": "Soft glass gradients and cool neon accents.",
+  "isBuiltIn": false,
+  "seedColor": "#88D9FF",
+  "surfaceTint": "#9AE7FF",
+  "backgroundTop": "#0B1E33",
+  "backgroundBottom": "#233A5A",
+  "accent": "#BDA7FF"
+}

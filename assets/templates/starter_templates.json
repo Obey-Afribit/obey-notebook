@@ -1,0 +1,27 @@
+[
+  {
+    "id": "todo",
+    "title": "Todo List",
+    "body": "- [ ] Item 1\n- [ ] Item 2\n- [ ] Item 3"
+  },
+  {
+    "id": "goals",
+    "title": "Goals",
+    "body": "Goal:\nWhy it matters:\nMilestones:\nDeadline:"
+  },
+  {
+    "id": "recipe",
+    "title": "Recipe",
+    "body": "Ingredients:\n1.\n2.\n\nSteps:\n1.\n2.\n\nNotes:"
+  },
+  {
+    "id": "grocery",
+    "title": "Grocery List",
+    "body": "Produce:\n-\n\nProteins:\n-\n\nPantry:\n-"
+  },
+  {
+    "id": "tasks",
+    "title": "Task Plan",
+    "body": "Task:\nPriority:\nDue Date:\nStatus:\nNotes:"
+  }
+]
