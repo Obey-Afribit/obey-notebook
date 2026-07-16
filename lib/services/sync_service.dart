@@ -15,9 +15,9 @@ import 'local_store_service.dart';
 /// the same map the app persists locally. This keeps the on-device format and
 /// the cloud format identical, so no field-by-field mapping is required.
 ///
-/// Conflict handling mirrors the original design: if the remote revision is
-/// newer than the local one, keep both copies (the remote wins the canonical
-/// id, the local edit becomes a "Conflict Copy").
+/// Sync strategy is last-write-wins: the most recent push for a given id wins.
+/// A device's own sequential edits are never treated as conflicts (that would
+/// duplicate a note every time an autosave lands after the cloud advanced).
 class SyncService {
   SyncService({
     required LocalStoreService localStore,
@@ -92,17 +92,30 @@ class SyncService {
 
     final SupabaseClient client = Supabase.instance.client;
     final String userId = _authService.currentUserId;
-    final List<SyncMutation> queue = _localStore.readQueue();
 
-    for (final SyncMutation mutation in queue) {
+    // Collapse the queue: for each entity keep only its most recent operation,
+    // and track every queued mutation id for that entity so all of them are
+    // cleared once the latest is applied. This prevents a backlog of stale
+    // autosaves from each hitting the network (and, previously, self-conflicting).
+    final List<SyncMutation> raw = _localStore.readQueue();
+    final Map<String, SyncMutation> latest = <String, SyncMutation>{};
+    final Map<String, List<String>> ids = <String, List<String>>{};
+    for (final SyncMutation m in raw) {
+      final String key = '${_entityKind(m.operation)}:${m.entityId}';
+      latest[key] = m; // raw is createdAt-ascending, so the last wins
+      (ids[key] ??= <String>[]).add(m.id);
+    }
+
+    final List<SyncMutation> collapsed = latest.values.toList()
+      ..sort((SyncMutation a, SyncMutation b) =>
+          a.createdAt.compareTo(b.createdAt));
+
+    for (final SyncMutation mutation in collapsed) {
+      final String key = '${_entityKind(mutation.operation)}:${mutation.entityId}';
       try {
         switch (mutation.operation) {
           case SyncOperation.upsertNote:
-            await _syncNoteUpsert(
-              client: client,
-              userId: userId,
-              mutation: mutation,
-            );
+            await _upsert(client, _notesTable, userId, mutation);
             break;
           case SyncOperation.deleteNote:
             await client
@@ -112,12 +125,7 @@ class SyncService {
                 .eq('owner_id', userId);
             break;
           case SyncOperation.upsertFolder:
-            await client.from(_foldersTable).upsert(<String, dynamic>{
-              'id': mutation.entityId,
-              'owner_id': userId,
-              'updated_at': DateTime.now().toUtc().toIso8601String(),
-              'data': mutation.payload,
-            });
+            await _upsert(client, _foldersTable, userId, mutation);
             break;
           case SyncOperation.deleteFolder:
             await client
@@ -128,7 +136,9 @@ class SyncService {
             break;
         }
 
-        await _localStore.removeMutation(mutation.id);
+        for (final String id in ids[key] ?? const <String>[]) {
+          await _localStore.removeMutation(id);
+        }
       } catch (_) {
         // Stop on the first failure; the queue is retried on the next tick.
         return false;
@@ -138,82 +148,48 @@ class SyncService {
     return true;
   }
 
-  Future<void> _syncNoteUpsert({
-    required SupabaseClient client,
-    required String userId,
-    required SyncMutation mutation,
-  }) async {
+  /// Last-write-wins upsert. No remote read, no conflict path.
+  Future<void> _upsert(
+    SupabaseClient client,
+    String table,
+    String userId,
+    SyncMutation mutation,
+  ) async {
     final Map<String, dynamic> localMap = mutation.payload;
-    final int localRevision = localMap['revision'] as int? ?? 0;
+    final int revision = (localMap['revision'] as int? ?? 0) + 1;
+    final String now = DateTime.now().toUtc().toIso8601String();
 
-    final Map<String, dynamic>? remoteRow = await client
-        .from(_notesTable)
-        .select('revision, data')
-        .eq('id', mutation.entityId)
-        .maybeSingle();
-
-    if (remoteRow != null) {
-      final int remoteRevision = remoteRow['revision'] as int? ?? 0;
-      if (remoteRevision > localRevision) {
-        final Map<String, dynamic> remoteData =
-            Map<String, dynamic>.from(remoteRow['data'] as Map<dynamic, dynamic>);
-        await _resolveConflictKeepBoth(
-          remote: remoteData,
-          localMap: localMap,
-        );
-        return;
-      }
-    }
-
-    final int newRevision = localRevision + 1;
     final Map<String, dynamic> uploadMap = <String, dynamic>{
       ...localMap,
       'localOnly': false,
-      'revision': newRevision,
-      'updatedAt': DateTime.now().toUtc().toIso8601String(),
+      'revision': revision,
+      'updatedAt': now,
     };
 
-    await client.from(_notesTable).upsert(<String, dynamic>{
+    await client.from(table).upsert(<String, dynamic>{
       'id': mutation.entityId,
       'owner_id': userId,
-      'revision': newRevision,
-      'updated_at': uploadMap['updatedAt'],
+      'revision': revision,
+      'updated_at': now,
       'data': uploadMap,
     });
 
-    await _localStore.upsertNote(NoteItem.fromMap(uploadMap));
+    if (table == _notesTable) {
+      await _localStore.upsertNote(NoteItem.fromMap(uploadMap));
+    } else {
+      await _localStore.upsertFolder(FolderItem.fromMap(uploadMap));
+    }
   }
 
-  Future<void> _resolveConflictKeepBoth({
-    required Map<String, dynamic> remote,
-    required Map<String, dynamic> localMap,
-  }) async {
-    final NoteItem local = NoteItem.fromMap(localMap);
-    final NoteItem remoteNote = NoteItem.fromMap(remote);
-    final String conflictId = _uuid.v4();
-
-    final NoteItem conflictCopy = local.copyWith(
-      id: conflictId,
-      title: '${local.title} (Conflict Copy)',
-      conflictGroupId: local.id,
-      localOnly: true,
-      revision: 0,
-      updatedAt: DateTime.now().toUtc(),
-    );
-
-    await _localStore.upsertNote(remoteNote.copyWith(localOnly: false));
-    await _localStore.upsertNote(conflictCopy);
-    await queueNoteUpsert(conflictCopy);
-
-    await _localStore.enqueueMutation(
-      SyncMutation(
-        id: _uuid.v4(),
-        operation: SyncOperation.upsertNote,
-        entityId: local.id,
-        payload: remoteNote.toMap(),
-        createdAt: DateTime.now().toUtc(),
-      ),
-    );
+  String _entityKind(SyncOperation op) {
+    switch (op) {
+      case SyncOperation.upsertNote:
+      case SyncOperation.deleteNote:
+        return 'note';
+      case SyncOperation.upsertFolder:
+      case SyncOperation.deleteFolder:
+        return 'folder';
+    }
   }
 
   Future<bool> _hasConnection() async {
