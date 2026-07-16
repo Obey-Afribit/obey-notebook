@@ -19,6 +19,18 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
+// Force every Android module (app + all plugin modules) to compile against
+// SDK 36. Newer plugin versions (flutter_plugin_android_lifecycle, file_picker,
+// etc.) require compileSdk 36, but the Flutter tool still hands plugins its
+// default (34). This override keeps every module consistent.
+subprojects {
+    afterEvaluate {
+        extensions.findByName("android")?.withGroovyBuilder {
+            "compileSdkVersion"(36)
+        }
+    }
+}
+
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
 }
