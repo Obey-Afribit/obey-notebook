@@ -3,7 +3,7 @@
     "short_name": "Notebook",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0F1417",
+    "background_color": "#262626",
     "theme_color": "#17B3A6",
     "description": "Offline-first notes with Markdown, folders, and cloud sync.",
     "orientation": "portrait-primary",

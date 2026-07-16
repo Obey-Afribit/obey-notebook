@@ -1,0 +1,43 @@
+const { Resvg } = require('@resvg/resvg-js');
+const fs = require('fs');
+
+const BG = '#262626';
+
+// Secretary bird head, profile facing right. Defined in a 1024 space.
+const BIRD = `
+  <g stroke="#F3F3F1" stroke-width="20" stroke-linecap="round" fill="none">
+    <path d="M566 470 Q400 486 232 500"/>
+    <path d="M568 458 Q408 442 252 424"/>
+    <path d="M572 448 Q430 398 306 362"/>
+    <path d="M578 442 Q462 358 362 320"/>
+    <path d="M584 438 Q492 344 410 298"/>
+    <path d="M590 438 Q526 344 462 292"/>
+    <path d="M598 440 Q554 354 520 292"/>
+  </g>
+  <path d="M526 470 C556 442 612 448 664 494 C676 505 680 532 674 550 C668 590 640 632 600 660 C582 672 566 672 554 658 C538 626 524 594 518 560 C506 536 488 532 494 500 C498 478 512 464 526 470 Z" fill="#F3F3F1"/>
+  <path d="M660 490 C702 476 750 486 764 512 C758 524 740 520 724 515 C734 540 720 556 698 552 C684 549 666 538 658 522 C654 512 654 500 660 490 Z" fill="#8B9198"/>
+  <path d="M712 546 C722 540 730 534 736 524 C732 544 720 556 702 553 Z" fill="#6E747B"/>
+  <ellipse cx="600" cy="512" rx="48" ry="30" fill="#EE7B2E" transform="rotate(-8 600 512)"/>
+  <circle cx="610" cy="510" r="15" fill="#221C1A"/>
+  <circle cx="615" cy="504" r="5" fill="#F3F3F1"/>
+`;
+
+const full = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <rect width="1024" height="1024" fill="${BG}"/>
+  <g transform="translate(512,512) scale(1.12) translate(-498,-492)">${BIRD}</g>
+</svg>`;
+
+const fg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <g transform="translate(512,512) scale(1.0) translate(-498,-492)">${BIRD}</g>
+</svg>`;
+
+function render(svg, out, size) {
+  const r = new Resvg(svg, { fitTo: { mode: 'width', value: size } });
+  fs.writeFileSync(out, r.render().asPng());
+}
+
+fs.writeFileSync('icon_full.svg', full);
+fs.writeFileSync('icon_fg.svg', fg);
+render(full, 'icon_full.png', 1024);
+render(fg, 'icon_fg.png', 1024);
+console.log('rendered');
