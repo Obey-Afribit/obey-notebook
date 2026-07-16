@@ -663,13 +663,6 @@ class NotebookController extends ChangeNotifier {
     return _themeController.setTheme(themeId);
   }
 
-  Future<void> downloadThemePack(String themeId) {
-    return _runBusy(() async {
-      _error = null;
-      await _themeController.downloadTheme(themeId);
-    });
-  }
-
   void setSearchQuery(String value) {
     _searchQuery = value;
     notifyListeners();

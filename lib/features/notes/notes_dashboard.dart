@@ -16,19 +16,14 @@ class NotesDashboard extends StatelessWidget {
 
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
-        final bool wide = constraints.maxWidth > 980;
+        final bool wide = constraints.maxWidth > 900;
 
         if (wide) {
           return Row(
             children: <Widget>[
-              SizedBox(
-                width: 320,
-                child: _FolderPanel(controller: controller),
-              ),
+              SizedBox(width: 288, child: _FolderPanel(controller: controller)),
               const VerticalDivider(width: 1),
-              Expanded(
-                child: _NotesPanel(controller: controller),
-              ),
+              Expanded(child: _NotesPanel(controller: controller)),
             ],
           );
         }
@@ -37,14 +32,25 @@ class NotesDashboard extends StatelessWidget {
           children: <Widget>[
             _CompactFolderSelector(controller: controller),
             const Divider(height: 1),
-            Expanded(
-              child: _NotesPanel(controller: controller),
-            ),
+            Expanded(child: _NotesPanel(controller: controller)),
           ],
         );
       },
     );
   }
+}
+
+/// Turns Markdown source into a clean one-glance preview snippet.
+String _previewText(String body) {
+  final String stripped = body
+      .replaceAll(RegExp(r'^#{1,6}\s+', multiLine: true), '')
+      .replaceAll(RegExp(r'^\s*[-*+]\s+\[[ xX]\]\s*', multiLine: true), '')
+      .replaceAll(RegExp(r'^\s*[-*+]\s+', multiLine: true), '')
+      .replaceAll(RegExp(r'^\s*>\s?', multiLine: true), '')
+      .replaceAll(RegExp(r'[*_`~]'), '')
+      .replaceAll(RegExp(r'\n{2,}'), '\n')
+      .trim();
+  return stripped;
 }
 
 class _CompactFolderSelector extends StatelessWidget {
@@ -55,13 +61,16 @@ class _CompactFolderSelector extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
       child: Row(
         children: <Widget>[
           Expanded(
             child: DropdownButtonFormField<String?>(
-              value: controller.selectedFolderId,
-              decoration: const InputDecoration(labelText: 'Folder'),
+              initialValue: controller.selectedFolderId,
+              decoration: const InputDecoration(
+                labelText: 'Folder',
+                prefixIcon: Icon(Icons.folder_outlined),
+              ),
               items: controller.folders
                   .map(
                     (FolderItem folder) => DropdownMenuItem<String?>(
@@ -70,16 +79,14 @@ class _CompactFolderSelector extends StatelessWidget {
                     ),
                   )
                   .toList(growable: false),
-              onChanged: (String? value) {
-                controller.selectFolder(value);
-              },
+              onChanged: controller.selectFolder,
             ),
           ),
           const SizedBox(width: 10),
-          IconButton(
+          IconButton.filledTonal(
             tooltip: 'New folder',
             onPressed: () => _showCreateFolderDialog(context, controller),
-            icon: const Icon(Icons.create_new_folder),
+            icon: const Icon(Icons.create_new_folder_outlined),
           ),
         ],
       ),
@@ -95,44 +102,50 @@ class _FolderPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final Map<String?, List<FolderItem>> tree = <String?, List<FolderItem>>{};
-
     for (final FolderItem folder in controller.folders) {
       tree.putIfAbsent(folder.parentId, () => <FolderItem>[]).add(folder);
     }
-
     for (final List<FolderItem> level in tree.values) {
       level.sort((FolderItem a, FolderItem b) => a.name.compareTo(b.name));
     }
 
     return Padding(
-      padding: const EdgeInsets.all(12),
-      child: Card(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            ListTile(
-              title: const Text('Folders'),
-              trailing: IconButton(
-                tooltip: 'New folder',
-                onPressed: () => _showCreateFolderDialog(context, controller),
-                icon: const Icon(Icons.create_new_folder),
-              ),
-            ),
-            const Divider(height: 1),
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                children: _buildFolderTiles(
-                  context: context,
-                  controller: controller,
-                  tree: tree,
-                  parentId: null,
-                  depth: 0,
+      padding: const EdgeInsets.fromLTRB(12, 12, 6, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 4, 4, 8),
+            child: Row(
+              children: <Widget>[
+                Text(
+                  'Folders',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
                 ),
+                const Spacer(),
+                IconButton(
+                  tooltip: 'New folder',
+                  onPressed: () => _showCreateFolderDialog(context, controller),
+                  icon: const Icon(Icons.create_new_folder_outlined),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView(
+              padding: EdgeInsets.zero,
+              children: _buildFolderTiles(
+                context: context,
+                controller: controller,
+                tree: tree,
+                parentId: null,
+                depth: 0,
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -146,35 +159,60 @@ class _FolderPanel extends StatelessWidget {
   }) {
     final List<FolderItem> children = tree[parentId] ?? const <FolderItem>[];
     final List<Widget> widgets = <Widget>[];
+    final ColorScheme scheme = Theme.of(context).colorScheme;
 
     for (final FolderItem folder in children) {
       final bool isSelected = controller.selectedFolderId == folder.id;
       final bool isLocked = controller.isFolderLocked(folder.id);
 
       widgets.add(
-        ListTile(
-          dense: true,
-          contentPadding:
-              EdgeInsets.only(left: 8 + (depth * 18).toDouble(), right: 8),
-          selected: isSelected,
-          leading: Icon(isLocked ? Icons.lock : Icons.folder),
-          title: Text(folder.name),
-          trailing: Wrap(
-            spacing: 2,
-            children: <Widget>[
-              IconButton(
-                icon: Icon(isLocked ? Icons.lock_open : Icons.lock_outline),
-                tooltip: isLocked ? 'Unlock folder setting' : 'Lock folder',
-                onPressed: () => controller.toggleFolderLock(folder.id),
+        Padding(
+          padding: EdgeInsets.only(left: depth * 14, bottom: 2),
+          child: Material(
+            color: isSelected
+                ? scheme.primaryContainer.withValues(alpha: 0.6)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(12),
+            child: ListTile(
+              dense: true,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
               ),
-              IconButton(
-                icon: const Icon(Icons.delete_outline),
-                tooltip: 'Delete folder',
-                onPressed: () => controller.deleteFolder(folder.id),
+              leading: Icon(
+                isLocked ? Icons.lock_outline : Icons.folder_outlined,
+                color: isSelected ? scheme.onPrimaryContainer : null,
+                size: 20,
               ),
-            ],
+              title: Text(
+                folder.name,
+                style: TextStyle(
+                  fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+                ),
+              ),
+              trailing: PopupMenuButton<String>(
+                icon: const Icon(Icons.more_horiz, size: 18),
+                tooltip: 'Folder actions',
+                onSelected: (String value) {
+                  if (value == 'lock') {
+                    controller.toggleFolderLock(folder.id);
+                  } else if (value == 'delete') {
+                    controller.deleteFolder(folder.id);
+                  }
+                },
+                itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+                  PopupMenuItem<String>(
+                    value: 'lock',
+                    child: Text(isLocked ? 'Remove lock' : 'Lock folder'),
+                  ),
+                  const PopupMenuItem<String>(
+                    value: 'delete',
+                    child: Text('Delete folder'),
+                  ),
+                ],
+              ),
+              onTap: () => controller.selectFolder(folder.id),
+            ),
           ),
-          onTap: () => controller.selectFolder(folder.id),
         ),
       );
 
@@ -202,152 +240,316 @@ class _NotesPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final List<NoteItem> notes = controller.filteredNotes;
 
-    return Padding(
-      padding: const EdgeInsets.all(12),
-      child: Card(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            if (!controller.cloudConfigured)
-              MaterialBanner(
-                content: const Text(
-                  'Cloud sync is unavailable for this build. Notes are saved locally on this device.',
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        if (!controller.cloudConfigured)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: _InfoBanner(
+              text:
+                  'Local-only mode. Notes are saved on this device; enable cloud sync any time.',
+              actionLabel: 'Retry',
+              onAction: controller.isBusy ? null : controller.retryCloudSetup,
+            ),
+          ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+          child: Column(
+            children: <Widget>[
+              TextField(
+                decoration: const InputDecoration(
+                  hintText: 'Search notes, tags, content...',
+                  prefixIcon: Icon(Icons.search),
                 ),
-                actions: <Widget>[
-                  TextButton(
-                    onPressed:
-                        controller.isBusy ? null : controller.retryCloudSetup,
-                    child: const Text('Retry Setup'),
-                  ),
-                ],
+                onChanged: controller.setSearchQuery,
               ),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
+              const SizedBox(height: 10),
+              Row(
                 children: <Widget>[
-                  TextField(
-                    decoration: const InputDecoration(
-                      labelText: 'Search notes',
-                      prefixIcon: Icon(Icons.search),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: <Widget>[
+                          FilterChip(
+                            label: const Text('Archived'),
+                            selected: controller.showArchived,
+                            onSelected: controller.setShowArchived,
+                          ),
+                          const SizedBox(width: 8),
+                          FilterChip(
+                            label: const Text('Has images'),
+                            selected: controller.hasImageFilter,
+                            onSelected: controller.setHasImageFilter,
+                          ),
+                          const SizedBox(width: 8),
+                          ActionChip(
+                            avatar: const Icon(Icons.date_range, size: 18),
+                            label: Text(
+                              controller.filterStartDate == null
+                                  ? 'Date'
+                                  : 'Date set',
+                            ),
+                            onPressed: () =>
+                                _showDateFilter(context, controller),
+                          ),
+                        ],
+                      ),
                     ),
-                    onChanged: controller.setSearchQuery,
                   ),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: <Widget>[
-                      FilterChip(
-                        label: const Text('Show archived'),
-                        selected: controller.showArchived,
-                        onSelected: controller.setShowArchived,
-                      ),
-                      FilterChip(
-                        label: const Text('Has images'),
-                        selected: controller.hasImageFilter,
-                        onSelected: controller.setHasImageFilter,
-                      ),
-                      ActionChip(
-                        label: Text(
-                          controller.filterStartDate == null &&
-                                  controller.filterEndDate == null
-                              ? 'Filter by date'
-                              : 'Date filter active',
-                        ),
-                        onPressed: () => _showDateFilter(context, controller),
-                      ),
-                      ActionChip(
-                        label: Text('Trash (${controller.trashNotes.length})'),
-                        onPressed: () => _showTrashDialog(context, controller),
-                      ),
-                    ],
+                  const SizedBox(width: 8),
+                  ActionChip(
+                    avatar: const Icon(Icons.delete_outline, size: 18),
+                    label: Text('Trash (${controller.trashNotes.length})'),
+                    onPressed: () => _showTrashDialog(context, controller),
                   ),
                 ],
               ),
-            ),
-            const Divider(height: 1),
-            Expanded(
-              child: notes.isEmpty
-                  ? const Center(
-                      child: Text('No notes yet. Create one to begin.'),
-                    )
-                  : ListView.separated(
-                      itemCount: notes.length,
-                      separatorBuilder: (_, __) => const Divider(height: 1),
-                      itemBuilder: (BuildContext context, int index) {
-                        final NoteItem note = notes[index];
-                        final String updated = DateFormat(
-                          'EEE, d MMM y HH:mm',
-                        ).format(note.updatedAt.toLocal());
-
-                        return ListTile(
-                          title: Text(note.title),
-                          subtitle: Text(
-                            '${note.body.replaceAll('\n', ' ')}\n$updated',
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          leading: note.conflictGroupId == null
-                              ? const Icon(Icons.note_outlined)
-                              : const Icon(Icons.warning_amber_rounded),
-                          trailing: PopupMenuButton<String>(
-                            onSelected: (String value) async {
-                              switch (value) {
-                                case 'share':
-                                  await controller.shareNote(note);
-                                  break;
-                                case 'pin':
-                                  await controller.togglePin(note);
-                                  break;
-                                case 'archive':
-                                  if (note.isArchived) {
-                                    await controller.unarchiveNote(note);
-                                  } else {
-                                    await controller.archiveNote(note);
-                                  }
-                                  break;
-                                case 'trash':
-                                  await controller.moveToTrash(note);
-                                  break;
-                                default:
-                                  break;
-                              }
-                            },
-                            itemBuilder: (BuildContext context) =>
-                                <PopupMenuEntry<String>>[
-                              const PopupMenuItem<String>(
-                                value: 'share',
-                                child: Text('Share'),
-                              ),
-                              PopupMenuItem<String>(
-                                value: 'pin',
-                                child: Text(note.isPinned ? 'Unpin' : 'Pin'),
-                              ),
-                              PopupMenuItem<String>(
-                                value: 'archive',
-                                child: Text(
-                                    note.isArchived ? 'Unarchive' : 'Archive'),
-                              ),
-                              const PopupMenuItem<String>(
-                                value: 'trash',
-                                child: Text('Move to trash'),
-                              ),
-                            ],
-                          ),
-                          onTap: () {
-                            Navigator.of(context).push(
-                              MaterialPageRoute<void>(
-                                builder: (_) =>
-                                    NoteEditorScreen(noteId: note.id),
-                              ),
-                            );
-                          },
-                        );
-                      },
-                    ),
-            ),
-          ],
+            ],
+          ),
         ),
+        Expanded(
+          child: notes.isEmpty
+              ? const _EmptyState()
+              : _NotesGrid(notes: notes, controller: controller),
+        ),
+      ],
+    );
+  }
+}
+
+class _NotesGrid extends StatelessWidget {
+  const _NotesGrid({required this.notes, required this.controller});
+
+  final List<NoteItem> notes;
+  final NotebookController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final int columns = (constraints.maxWidth / 320).floor().clamp(1, 4);
+
+        return GridView.builder(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 96),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: columns,
+            mainAxisExtent: 168,
+            crossAxisSpacing: 12,
+            mainAxisSpacing: 12,
+          ),
+          itemCount: notes.length,
+          itemBuilder: (BuildContext context, int index) {
+            return _NoteCard(note: notes[index], controller: controller);
+          },
+        );
+      },
+    );
+  }
+}
+
+class _NoteCard extends StatelessWidget {
+  const _NoteCard({required this.note, required this.controller});
+
+  final NoteItem note;
+  final NotebookController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    final String preview = _previewText(note.body);
+    final String updated =
+        DateFormat('d MMM, HH:mm').format(note.updatedAt.toLocal());
+    final bool isConflict = note.conflictGroupId != null;
+
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => NoteEditorScreen(noteId: note.id),
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  if (isConflict)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: Icon(Icons.warning_amber_rounded,
+                          size: 18, color: scheme.error),
+                    ),
+                  Expanded(
+                    child: Text(
+                      note.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                    ),
+                  ),
+                  if (note.isPinned)
+                    Icon(Icons.push_pin, size: 16, color: scheme.primary),
+                  _NoteMenu(note: note, controller: controller),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Expanded(
+                child: Text(
+                  preview.isEmpty ? 'Empty note' : preview,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: <Widget>[
+                  Text(
+                    updated,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                  ),
+                  const Spacer(),
+                  if (note.imagePaths.isNotEmpty) ...<Widget>[
+                    Icon(Icons.image_outlined,
+                        size: 15, color: scheme.onSurfaceVariant),
+                    const SizedBox(width: 2),
+                    Text('${note.imagePaths.length}',
+                        style: Theme.of(context).textTheme.bodySmall),
+                    const SizedBox(width: 8),
+                  ],
+                  if (note.reminderAt != null)
+                    Icon(Icons.alarm, size: 15, color: scheme.onSurfaceVariant),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _NoteMenu extends StatelessWidget {
+  const _NoteMenu({required this.note, required this.controller});
+
+  final NoteItem note;
+  final NotebookController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<String>(
+      icon: const Icon(Icons.more_vert, size: 18),
+      tooltip: 'Note actions',
+      onSelected: (String value) async {
+        switch (value) {
+          case 'share':
+            await controller.shareNote(note);
+            break;
+          case 'pin':
+            await controller.togglePin(note);
+            break;
+          case 'archive':
+            if (note.isArchived) {
+              await controller.unarchiveNote(note);
+            } else {
+              await controller.archiveNote(note);
+            }
+            break;
+          case 'trash':
+            await controller.moveToTrash(note);
+            break;
+        }
+      },
+      itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+        const PopupMenuItem<String>(value: 'share', child: Text('Share')),
+        PopupMenuItem<String>(
+          value: 'pin',
+          child: Text(note.isPinned ? 'Unpin' : 'Pin'),
+        ),
+        PopupMenuItem<String>(
+          value: 'archive',
+          child: Text(note.isArchived ? 'Unarchive' : 'Archive'),
+        ),
+        const PopupMenuItem<String>(
+          value: 'trash',
+          child: Text('Move to trash'),
+        ),
+      ],
+    );
+  }
+}
+
+class _EmptyState extends StatelessWidget {
+  const _EmptyState();
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(Icons.edit_note,
+              size: 72, color: scheme.primary.withValues(alpha: 0.6)),
+          const SizedBox(height: 12),
+          Text(
+            'No notes here yet',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Tap the New note button to start writing.',
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InfoBanner extends StatelessWidget {
+  const _InfoBanner({
+    required this.text,
+    required this.actionLabel,
+    required this.onAction,
+  });
+
+  final String text;
+  final String actionLabel;
+  final VoidCallback? onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
+      decoration: BoxDecoration(
+        color: scheme.secondaryContainer.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        children: <Widget>[
+          Icon(Icons.cloud_off_outlined,
+              size: 20, color: scheme.onSecondaryContainer),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(text, style: Theme.of(context).textTheme.bodySmall),
+          ),
+          TextButton(onPressed: onAction, child: Text(actionLabel)),
+        ],
       ),
     );
   }
@@ -365,7 +567,6 @@ Future<void> _showDateFilter(
     firstDate: DateTime(now.year - 5),
     lastDate: DateTime(now.year + 5),
   );
-
   if (startDate == null || !context.mounted) {
     return;
   }
@@ -376,7 +577,6 @@ Future<void> _showDateFilter(
     firstDate: startDate,
     lastDate: DateTime(now.year + 5),
   );
-
   if (endDate == null) {
     return;
   }
@@ -396,7 +596,10 @@ Future<void> _showTrashDialog(
         content: SizedBox(
           width: 640,
           child: controller.trashNotes.isEmpty
-              ? const Center(child: Text('Trash is empty.'))
+              ? const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Center(child: Text('Trash is empty.')),
+                )
               : ListView.builder(
                   shrinkWrap: true,
                   itemCount: controller.trashNotes.length,
@@ -405,7 +608,7 @@ Future<void> _showTrashDialog(
                     return ListTile(
                       title: Text(note.title),
                       subtitle: Text(
-                        note.body,
+                        _previewText(note.body),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -429,16 +632,16 @@ Future<void> _showTrashDialog(
         ),
         actions: <Widget>[
           TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Close'),
-          ),
-          TextButton(
             onPressed: () {
               controller.setDateFilter(startDate: null, endDate: null);
               controller.setHasImageFilter(false);
               Navigator.of(dialogContext).pop();
             },
-            child: const Text('Clear Filters'),
+            child: const Text('Clear filters'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Close'),
           ),
         ],
       );
@@ -457,7 +660,7 @@ Future<void> _showCreateFolderDialog(
     context: context,
     builder: (BuildContext dialogContext) {
       return AlertDialog(
-        title: const Text('Create Folder'),
+        title: const Text('Create folder'),
         content: StatefulBuilder(
           builder: (
             BuildContext context,
@@ -468,11 +671,12 @@ Future<void> _showCreateFolderDialog(
               children: <Widget>[
                 TextField(
                   controller: nameController,
+                  autofocus: true,
                   decoration: const InputDecoration(labelText: 'Folder name'),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 12),
                 DropdownButtonFormField<String?>(
-                  value: parentId,
+                  initialValue: parentId,
                   decoration: const InputDecoration(labelText: 'Parent folder'),
                   items: <DropdownMenuItem<String?>>[
                     const DropdownMenuItem<String?>(
@@ -486,11 +690,8 @@ Future<void> _showCreateFolderDialog(
                       ),
                     ),
                   ],
-                  onChanged: (String? value) {
-                    setState(() {
-                      parentId = value;
-                    });
-                  },
+                  onChanged: (String? value) =>
+                      setState(() => parentId = value),
                 ),
               ],
             );

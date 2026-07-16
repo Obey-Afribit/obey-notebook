@@ -1,195 +1,197 @@
 import 'package:flutter/material.dart';
 
 import '../../services/local_store_service.dart';
-import '../../services/theme_pack_service.dart';
-import '../models/theme_pack.dart';
-import 'color_hex.dart';
+import 'app_theme.dart';
 
+/// Owns the active theme (seed color) and the light/dark mode, and builds the
+/// polished [ThemeData] the app renders with.
 class ThemeController extends ChangeNotifier {
-  ThemeController({
-    required LocalStoreService localStore,
-    required ThemePackService themePackService,
-  })  : _localStore = localStore,
-        _themePackService = themePackService;
+  ThemeController({required LocalStoreService localStore})
+      : _localStore = localStore;
 
   final LocalStoreService _localStore;
-  final ThemePackService _themePackService;
 
-  final Map<String, ThemePack> _availableThemes = <String, ThemePack>{};
-  final Map<String, String> _downloadFallbackAssets = <String, String>{};
-
-  ThemePack? _currentTheme;
+  AppTheme _current = kThemePresets.first;
+  ThemeMode _themeMode = ThemeMode.system;
   bool _isLoading = true;
-  String? _error;
 
-  ThemePack? get currentTheme => _currentTheme;
   bool get isLoading => _isLoading;
-  String? get error => _error;
-  List<ThemePack> get availableThemes =>
-      _availableThemes.values.toList(growable: false);
+  List<AppTheme> get themes => kThemePresets;
+  AppTheme get currentTheme => _current;
+  String get currentThemeId => _current.id;
+  ThemeMode get themeMode => _themeMode;
 
   Future<void> initialize() async {
     _isLoading = true;
-    _availableThemes.clear();
-    _downloadFallbackAssets.clear();
     notifyListeners();
 
-    try {
-      final Map<String, dynamic> catalog =
-          await _themePackService.loadCatalog();
-      final List<dynamic> themes =
-          catalog['themes'] as List<dynamic>? ?? const <dynamic>[];
+    final String selectedId =
+        _localStore.readSelectedThemeId() ?? kDefaultThemeId;
+    _current = kThemePresets.firstWhere(
+      (AppTheme theme) => theme.id == selectedId,
+      orElse: () => kThemePresets.first,
+    );
+    _themeMode = _themeModeFromString(_localStore.readThemeMode());
 
-      for (final dynamic rawTheme in themes) {
-        final Map<String, dynamic> entry =
-            (rawTheme as Map<dynamic, dynamic>).map(
-          (dynamic key, dynamic value) => MapEntry(key.toString(), value),
-        );
-
-        final bool isBuiltIn = entry['isBuiltIn'] == true;
-        if (isBuiltIn) {
-          final ThemePack builtIn = await _themePackService.loadBuiltInTheme(
-            entry['assetPath'] as String,
-          );
-          _availableThemes[builtIn.id] = builtIn;
-          continue;
-        }
-
-        final String id = entry['id'] as String;
-        final String? fallbackAssetPath = entry['fallbackAssetPath'] as String?;
-        if ((fallbackAssetPath ?? '').isNotEmpty) {
-          _downloadFallbackAssets[id] = fallbackAssetPath!;
-        }
-
-        _availableThemes[id] = ThemePack(
-          id: id,
-          name: entry['name'] as String,
-          description: entry['description'] as String? ?? '',
-          seedColorHex: '#1E1E1E',
-          backgroundTopHex: '#111111',
-          backgroundBottomHex: '#1B1B1B',
-          accentHex: '#00E5FF',
-          isBuiltIn: false,
-          downloadUrl: entry['downloadUrl'] as String?,
-        );
-      }
-
-      final List<ThemePack> downloaded = _localStore.readDownloadedThemes();
-      for (final ThemePack pack in downloaded) {
-        _availableThemes[pack.id] = pack;
-      }
-
-      final String selectedThemeId = _localStore.readSelectedThemeId() ??
-          (catalog['defaultTheme'] as String? ?? 'aurora');
-
-      _currentTheme =
-          _availableThemes[selectedThemeId] ?? _availableThemes.values.first;
-      _error = null;
-    } catch (error) {
-      _error = error.toString();
-      _currentTheme ??= const ThemePack(
-        id: 'fallback',
-        name: 'Fallback',
-        seedColorHex: '#3DD6D0',
-        backgroundTopHex: '#081126',
-        backgroundBottomHex: '#133B5C',
-        accentHex: '#8E7CFF',
-      );
-    } finally {
-      _isLoading = false;
-      notifyListeners();
-    }
+    _isLoading = false;
+    notifyListeners();
   }
 
   Future<void> setTheme(String themeId) async {
-    final ThemePack? selected = _availableThemes[themeId];
-    if (selected == null) {
+    final AppTheme? match = kThemePresets
+        .where((AppTheme theme) => theme.id == themeId)
+        .firstOrNull;
+    if (match == null || match.id == _current.id) {
       return;
     }
-
-    _currentTheme = selected;
-    await _localStore.saveSelectedThemeId(themeId);
+    _current = match;
+    await _localStore.saveSelectedThemeId(match.id);
     notifyListeners();
   }
 
-  Future<void> downloadTheme(String themeId) async {
-    final ThemePack? entry = _availableThemes[themeId];
-    if (entry == null || entry.downloadUrl == null) {
+  Future<void> setThemeMode(ThemeMode mode) async {
+    if (mode == _themeMode) {
       return;
     }
-
-    try {
-      final ThemePack downloaded = await _themePackService.downloadTheme(
-        id: entry.id,
-        name: entry.name,
-        downloadUrl: entry.downloadUrl!,
-        fallbackAssetPath: _downloadFallbackAssets[entry.id],
-      );
-
-      _availableThemes[downloaded.id] = downloaded;
-      await _localStore.saveDownloadedTheme(downloaded);
-      _error = null;
-      notifyListeners();
-    } catch (error) {
-      _error = 'Failed to load theme ${entry.name}: $error';
-      notifyListeners();
-      rethrow;
-    }
+    _themeMode = mode;
+    await _localStore.saveThemeMode(mode.name);
+    notifyListeners();
   }
 
-  ThemeData buildThemeData() {
-    final ThemePack active = _currentTheme ??
-        const ThemePack(
-          id: 'aurora',
-          name: 'Aurora',
-          seedColorHex: '#3DD6D0',
-          backgroundTopHex: '#081126',
-          backgroundBottomHex: '#133B5C',
-          accentHex: '#8E7CFF',
-        );
+  ThemeData get lightTheme => _buildTheme(Brightness.light);
+  ThemeData get darkTheme => _buildTheme(Brightness.dark);
 
-    final Color seed = colorFromHex(active.seedColorHex);
-    return ThemeData(
+  ThemeData _buildTheme(Brightness brightness) {
+    final ColorScheme scheme = ColorScheme.fromSeed(
+      seedColor: _current.seed,
+      brightness: brightness,
+    );
+
+    final ThemeData base = ThemeData(
       useMaterial3: true,
-      brightness: Brightness.dark,
-      colorScheme: ColorScheme.fromSeed(
-        seedColor: seed,
-        brightness: Brightness.dark,
-      ),
-      scaffoldBackgroundColor: colorFromHex(active.backgroundTopHex),
+      brightness: brightness,
+      colorScheme: scheme,
+      scaffoldBackgroundColor: scheme.surface,
+      splashFactory: InkSparkle.splashFactory,
+    );
+
+    return base.copyWith(
       appBarTheme: AppBarTheme(
-        backgroundColor: colorFromHex(active.backgroundTopHex),
-        foregroundColor: Colors.white,
+        backgroundColor: scheme.surface,
+        foregroundColor: scheme.onSurface,
+        surfaceTintColor: Colors.transparent,
+        centerTitle: false,
+        elevation: 0,
+        scrolledUnderElevation: 2,
+        titleTextStyle: base.textTheme.titleLarge?.copyWith(
+          fontWeight: FontWeight.w700,
+          letterSpacing: -0.2,
+        ),
       ),
       cardTheme: CardThemeData(
-        color: colorFromHex(active.backgroundBottomHex).withValues(alpha: 0.85),
+        elevation: 0,
+        color: scheme.surfaceContainerLow,
+        surfaceTintColor: Colors.transparent,
+        margin: EdgeInsets.zero,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+          side: BorderSide(
+            color: scheme.outlineVariant.withValues(alpha: 0.5),
+          ),
+        ),
       ),
-      inputDecorationTheme: const InputDecorationTheme(
-        border: OutlineInputBorder(),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide.none,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: scheme.primary, width: 1.5),
+        ),
+      ),
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          textStyle: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+      ),
+      chipTheme: ChipThemeData(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+        ),
+        side: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.6)),
+      ),
+      navigationBarTheme: NavigationBarThemeData(
+        backgroundColor: scheme.surface,
+        surfaceTintColor: Colors.transparent,
+        indicatorColor: scheme.primaryContainer,
+        elevation: 3,
+        labelTextStyle: WidgetStateProperty.all(
+          const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+        ),
+      ),
+      navigationRailTheme: NavigationRailThemeData(
+        backgroundColor: scheme.surface,
+        indicatorColor: scheme.primaryContainer,
+        selectedLabelTextStyle: TextStyle(
+          color: scheme.onSurface,
+          fontWeight: FontWeight.w600,
+        ),
+        unselectedLabelTextStyle: TextStyle(color: scheme.onSurfaceVariant),
+      ),
+      dividerTheme: DividerThemeData(
+        color: scheme.outlineVariant.withValues(alpha: 0.5),
+        space: 1,
+        thickness: 1,
+      ),
+      floatingActionButtonTheme: FloatingActionButtonThemeData(
+        elevation: 2,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+        ),
+      ),
+      dialogTheme: DialogThemeData(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+        ),
+      ),
+      snackBarTheme: SnackBarThemeData(
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+        ),
       ),
     );
   }
 
-  BoxDecoration buildBackgroundDecoration() {
-    final ThemePack active = _currentTheme ??
-        const ThemePack(
-          id: 'aurora',
-          name: 'Aurora',
-          seedColorHex: '#3DD6D0',
-          backgroundTopHex: '#081126',
-          backgroundBottomHex: '#133B5C',
-          accentHex: '#8E7CFF',
-        );
-
-    return BoxDecoration(
-      gradient: LinearGradient(
-        colors: <Color>[
-          colorFromHex(active.backgroundTopHex),
-          colorFromHex(active.backgroundBottomHex),
-        ],
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-      ),
-    );
+  ThemeMode _themeModeFromString(String? value) {
+    switch (value) {
+      case 'light':
+        return ThemeMode.light;
+      case 'dark':
+        return ThemeMode.dark;
+      default:
+        return ThemeMode.system;
+    }
   }
 }

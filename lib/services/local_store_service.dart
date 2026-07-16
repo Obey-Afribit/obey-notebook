@@ -4,7 +4,6 @@ import '../core/models/folder_item.dart';
 import '../core/models/note_item.dart';
 import '../core/models/sync_mutation.dart';
 import '../core/models/template_item.dart';
-import '../core/models/theme_pack.dart';
 
 class LocalStoreService {
   static const String notesBoxName = 'notes_box';
@@ -12,7 +11,6 @@ class LocalStoreService {
   static const String templatesBoxName = 'templates_box';
   static const String settingsBoxName = 'settings_box';
   static const String queueBoxName = 'sync_queue_box';
-  static const String downloadedThemesBoxName = 'downloaded_themes_box';
   static const String noteVersionsBoxName = 'note_versions_box';
 
   bool _initialized = false;
@@ -29,7 +27,6 @@ class LocalStoreService {
       Hive.openBox<dynamic>(templatesBoxName),
       Hive.openBox<dynamic>(settingsBoxName),
       Hive.openBox<dynamic>(queueBoxName),
-      Hive.openBox<dynamic>(downloadedThemesBoxName),
       Hive.openBox<dynamic>(noteVersionsBoxName),
     ]);
 
@@ -137,6 +134,14 @@ class LocalStoreService {
     await _box(settingsBoxName).put('selected_theme_id', themeId);
   }
 
+  String? readThemeMode() {
+    return _box(settingsBoxName).get('theme_mode') as String?;
+  }
+
+  Future<void> saveThemeMode(String mode) async {
+    await _box(settingsBoxName).put('theme_mode', mode);
+  }
+
   bool readStaySignedIn() {
     return _box(settingsBoxName).get('stay_signed_in') as bool? ?? true;
   }
@@ -163,19 +168,6 @@ class LocalStoreService {
 
   Future<void> saveLockedFolderIds(Set<String> ids) async {
     await _box(settingsBoxName).put('locked_folder_ids', ids.toList());
-  }
-
-  Future<void> saveDownloadedTheme(ThemePack themePack) async {
-    await _box(downloadedThemesBoxName).put(themePack.id, themePack.toMap());
-  }
-
-  List<ThemePack> readDownloadedThemes() {
-    final Box<dynamic> box = _box(downloadedThemesBoxName);
-    return box.values
-        .whereType<Map>()
-        .map((Map<dynamic, dynamic> raw) => _toStringDynamicMap(raw))
-        .map(ThemePack.fromMap)
-        .toList(growable: false);
   }
 
   Future<void> appendNoteVersion(NoteItem note) async {

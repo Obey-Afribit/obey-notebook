@@ -14,7 +14,6 @@ import 'services/share_service.dart';
 import 'services/speech_service.dart';
 import 'services/sync_service.dart';
 import 'services/template_service.dart';
-import 'services/theme_pack_service.dart';
 import 'state/notebook_controller.dart';
 
 Future<void> main() async {
@@ -66,10 +65,7 @@ class _UniversalNotebookAppState extends State<UniversalNotebookApp> {
       authService: _authService,
     );
     _templateService = TemplateService(localStore: _localStoreService);
-    _themeController = ThemeController(
-      localStore: _localStoreService,
-      themePackService: ThemePackService(),
-    );
+    _themeController = ThemeController(localStore: _localStoreService);
     _speechService = SpeechService();
     _ocrService = OcrService();
     _reminderService = ReminderService();
@@ -113,7 +109,9 @@ class _UniversalNotebookAppState extends State<UniversalNotebookApp> {
           return MaterialApp(
             title: 'Universal Notebook',
             debugShowCheckedModeBanner: false,
-            theme: theme.buildThemeData(),
+            theme: theme.lightTheme,
+            darkTheme: theme.darkTheme,
+            themeMode: theme.themeMode,
             home: const AuthGate(),
           );
         },

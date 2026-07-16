@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/models/folder_item.dart';
-import '../../core/models/theme_pack.dart';
+import '../../core/theme/app_theme.dart';
 import '../../core/theme/theme_controller.dart';
 import '../../state/notebook_controller.dart';
 
@@ -15,11 +15,13 @@ class SettingsScreen extends StatelessWidget {
     final ThemeController themeController = context.watch<ThemeController>();
 
     return ListView(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(16),
       children: <Widget>[
+        _AppearanceCard(themeController: themeController),
+        const SizedBox(height: 12),
         Card(
           child: ListTile(
-            title: const Text('Stay Signed In'),
+            title: const Text('Stay signed in'),
             subtitle: const Text('Keep session active across app restarts.'),
             trailing: Switch(
               value: controller.staySignedIn,
@@ -27,6 +29,7 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
         ),
+        const SizedBox(height: 12),
         Card(
           child: ListTile(
             title: const Text('Sync'),
@@ -35,90 +38,11 @@ class SettingsScreen extends StatelessWidget {
             ),
             trailing: FilledButton(
               onPressed: controller.isBusy ? null : controller.syncNow,
-              child: const Text('Sync Now'),
+              child: const Text('Sync now'),
             ),
           ),
         ),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                const Text(
-                  'Themes',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children:
-                      themeController.availableThemes.map((ThemePack pack) {
-                    final bool isSelected =
-                        themeController.currentTheme?.id == pack.id;
-                    final bool isPlaceholder = !pack.isBuiltIn &&
-                        pack.downloadUrl != null &&
-                        pack.seedColorHex == '#1E1E1E';
-
-                    return SizedBox(
-                      width: 240,
-                      child: Card(
-                        child: Padding(
-                          padding: const EdgeInsets.all(10),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: <Widget>[
-                              Text(
-                                pack.name,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w700,
-                                  fontSize: 16,
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                pack.description.isEmpty
-                                    ? 'Theme pack for notebook visuals.'
-                                    : pack.description,
-                              ),
-                              const SizedBox(height: 8),
-                              Row(
-                                children: <Widget>[
-                                  if (isPlaceholder)
-                                    OutlinedButton(
-                                      onPressed: () =>
-                                          controller.downloadThemePack(pack.id),
-                                      child: const Text('Download'),
-                                    )
-                                  else
-                                    FilledButton(
-                                      onPressed: () =>
-                                          controller.setTheme(pack.id),
-                                      child: Text(
-                                        isSelected ? 'Selected' : 'Use Theme',
-                                      ),
-                                    ),
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    );
-                  }).toList(growable: false),
-                ),
-                if (themeController.error != null) ...<Widget>[
-                  const SizedBox(height: 8),
-                  Text(
-                    themeController.error!,
-                    style: const TextStyle(color: Colors.redAccent),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ),
+        const SizedBox(height: 12),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(12),
@@ -142,6 +66,7 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
         ),
+        const SizedBox(height: 12),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(12),
@@ -195,6 +120,7 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
         ),
+        const SizedBox(height: 12),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(12),
@@ -268,6 +194,127 @@ class SettingsScreen extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _AppearanceCard extends StatelessWidget {
+  const _AppearanceCard({required this.themeController});
+
+  final ThemeController themeController;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            const Text(
+              'Appearance',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 14),
+            Text('Mode', style: Theme.of(context).textTheme.labelLarge),
+            const SizedBox(height: 8),
+            SegmentedButton<ThemeMode>(
+              segments: const <ButtonSegment<ThemeMode>>[
+                ButtonSegment<ThemeMode>(
+                  value: ThemeMode.system,
+                  icon: Icon(Icons.brightness_auto_outlined),
+                  label: Text('System'),
+                ),
+                ButtonSegment<ThemeMode>(
+                  value: ThemeMode.light,
+                  icon: Icon(Icons.light_mode_outlined),
+                  label: Text('Light'),
+                ),
+                ButtonSegment<ThemeMode>(
+                  value: ThemeMode.dark,
+                  icon: Icon(Icons.dark_mode_outlined),
+                  label: Text('Dark'),
+                ),
+              ],
+              selected: <ThemeMode>{themeController.themeMode},
+              onSelectionChanged: (Set<ThemeMode> selection) =>
+                  themeController.setThemeMode(selection.first),
+            ),
+            const SizedBox(height: 20),
+            Text('Accent color', style: Theme.of(context).textTheme.labelLarge),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 14,
+              runSpacing: 14,
+              children: themeController.themes.map((AppTheme theme) {
+                final bool isSelected =
+                    themeController.currentThemeId == theme.id;
+                return _SwatchButton(
+                  color: theme.seed,
+                  label: theme.name,
+                  selected: isSelected,
+                  outline: scheme.outlineVariant,
+                  onTap: () => themeController.setTheme(theme.id),
+                );
+              }).toList(growable: false),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SwatchButton extends StatelessWidget {
+  const _SwatchButton({
+    required this.color,
+    required this.label,
+    required this.selected,
+    required this.outline,
+    required this.onTap,
+  });
+
+  final Color color;
+  final String label;
+  final bool selected;
+  final Color outline;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: label,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(40),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          width: 48,
+          height: 48,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: selected ? color : outline.withValues(alpha: 0.5),
+              width: selected ? 3 : 1,
+            ),
+            boxShadow: selected
+                ? <BoxShadow>[
+                    BoxShadow(
+                      color: color.withValues(alpha: 0.5),
+                      blurRadius: 12,
+                      spreadRadius: 1,
+                    ),
+                  ]
+                : null,
+          ),
+          child: selected
+              ? const Icon(Icons.check, color: Colors.white, size: 22)
+              : null,
+        ),
+      ),
     );
   }
 }

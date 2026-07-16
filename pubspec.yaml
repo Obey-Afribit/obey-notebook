@@ -45,5 +45,4 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
-    - assets/theme_packs/
     - assets/templates/
