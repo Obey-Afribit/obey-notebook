@@ -1,11 +1,11 @@
 {
-    "name": "universal_notebook",
-    "short_name": "universal_notebook",
+    "name": "Universal Notebook",
+    "short_name": "Notebook",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#0F1417",
+    "theme_color": "#17B3A6",
+    "description": "Offline-first notes with Markdown, folders, and cloud sync.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

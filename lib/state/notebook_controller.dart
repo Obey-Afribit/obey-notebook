@@ -7,6 +7,7 @@ import '../core/models/folder_item.dart';
 import '../core/models/note_item.dart';
 import '../core/models/template_item.dart';
 import '../core/theme/theme_controller.dart';
+import '../services/ai_service.dart';
 import '../services/auth_service.dart';
 import '../services/local_store_service.dart';
 import '../services/ocr_service.dart';
@@ -29,6 +30,7 @@ class NotebookController extends ChangeNotifier {
     required ReminderService reminderService,
     required ShareService shareService,
     required PrivacyLockService privacyLockService,
+    required AiService aiService,
   })  : _authService = authService,
         _localStoreService = localStoreService,
         _syncService = syncService,
@@ -38,7 +40,8 @@ class NotebookController extends ChangeNotifier {
         _ocrService = ocrService,
         _reminderService = reminderService,
         _shareService = shareService,
-        _privacyLockService = privacyLockService;
+        _privacyLockService = privacyLockService,
+        _aiService = aiService;
 
   final AuthService _authService;
   final LocalStoreService _localStoreService;
@@ -50,6 +53,7 @@ class NotebookController extends ChangeNotifier {
   final ReminderService _reminderService;
   final ShareService _shareService;
   final PrivacyLockService _privacyLockService;
+  final AiService _aiService;
 
   final Uuid _uuid = const Uuid();
 
@@ -560,6 +564,25 @@ class NotebookController extends ChangeNotifier {
 
   bool get ocrSupported => _ocrService.isSupported;
 
+  // ---------------------------------------------------------------------------
+  // AI (Claude) assistance
+  // ---------------------------------------------------------------------------
+
+  bool get aiAvailable => _aiService.isAvailable;
+
+  Future<String> summarizeText(String text) => _aiService.summarize(text);
+
+  Future<String> cleanUpText(String text) => _aiService.cleanUp(text);
+
+  Future<void> suggestAndAddTags(NoteItem note) async {
+    final List<String> suggested = await _aiService.suggestTags(note.body);
+    if (suggested.isEmpty) {
+      return;
+    }
+    final Set<String> merged = <String>{...note.tags, ...suggested};
+    await saveNote(note.copyWith(tags: merged.toList(growable: false)));
+  }
+
   Future<void> shareNote(NoteItem note) {
     return _shareService.shareNoteWithImages(
       title: note.title,
@@ -568,33 +591,19 @@ class NotebookController extends ChangeNotifier {
     );
   }
 
-  Future<void> exportNoteAsTxt(NoteItem note) async {
-    final String path = await _shareService.exportNoteAsTxt(note);
-    await _shareService.shareFilePath(
-      filePath: path,
-      subject: '${note.title} (TXT export)',
-    );
+  Future<void> exportNoteAsTxt(NoteItem note) {
+    return _shareService.exportNoteAsTxt(note);
   }
 
-  Future<void> exportNoteAsPdf(NoteItem note) async {
-    final String path = await _shareService.exportNoteAsPdf(note);
-    await _shareService.shareFilePath(
-      filePath: path,
-      subject: '${note.title} (PDF export)',
-    );
+  Future<void> exportNoteAsPdf(NoteItem note) {
+    return _shareService.exportNoteAsPdf(note);
   }
 
-  Future<void> exportAllDataBackup() async {
-    final String path = await _shareService.exportBackupJson(
+  Future<void> exportAllDataBackup() {
+    return _shareService.exportBackupJson(
       notes: _notes,
       folders: _folders,
       templates: _templates,
-    );
-
-    await _shareService.shareFilePath(
-      filePath: path,
-      subject: 'Universal Notebook data backup',
-      text: 'Notebook backup export',
     );
   }
 
@@ -806,6 +815,7 @@ class NotebookController extends ChangeNotifier {
     _syncTimer?.cancel();
     unawaited(_authService.dispose());
     unawaited(_ocrService.dispose());
+    _aiService.dispose();
     super.dispose();
   }
 }

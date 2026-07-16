@@ -36,11 +36,15 @@ flutter run -d windows ^
   --dart-define=SUPABASE_ANON_KEY=YOUR_ANON_KEY
 ```
 
-AI features (optional) are enabled by also passing:
+AI features (optional, Claude-powered) are enabled by also passing:
 
 ```
   --dart-define=ANTHROPIC_API_KEY=YOUR_KEY
 ```
+
+The key is read at build time. It is fine for a personal build with your own
+key, but a published app should proxy AI calls through a backend (e.g. a
+Supabase Edge Function) rather than shipping the key to clients.
 
 ### Cloud setup (one time)
 
@@ -51,10 +55,17 @@ AI features (optional) are enabled by also passing:
 
 ## Features
 
-Local-first notes with autosave, nested folders (with biometric lock), search
-and filters, templates, TXT/PDF export, share, reminders, version history,
-pin / archive / trash, quick capture, and a theme system. Speech-to-text is
-available on supported platforms; OCR returns in the mobile build.
+Local-first notes with a **Markdown editor** (formatting toolbar + live split
+preview), autosave, nested folders (with biometric lock), search and filters,
+templates, TXT/PDF export, share, reminders, version history, pin / archive /
+trash, quick capture, and a **theme system** (8 accent colors × light/dark/system
+mode). **AI assist** (Claude) can summarize a note, clean up rough writing, and
+suggest tags when a key is configured. Speech-to-text is available on supported
+platforms (including Windows via SAPI); OCR returns in the mobile build.
+
+Runs on **Windows, Android, and the web** (installable PWA). The web build works
+with the same codebase; file exports and `dart:io` usage are behind conditional
+imports so the web target compiles cleanly.
 
 ## Project layout
 

@@ -5,6 +5,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'core/app_config.dart';
 import 'core/theme/theme_controller.dart';
 import 'features/auth/auth_gate.dart';
+import 'services/ai_service.dart';
 import 'services/auth_service.dart';
 import 'services/local_store_service.dart';
 import 'services/ocr_service.dart';
@@ -52,6 +53,7 @@ class _UniversalNotebookAppState extends State<UniversalNotebookApp> {
   late final ReminderService _reminderService;
   late final ShareService _shareService;
   late final PrivacyLockService _privacyLockService;
+  late final AiService _aiService;
   late final NotebookController _notebookController;
 
   @override
@@ -71,6 +73,7 @@ class _UniversalNotebookAppState extends State<UniversalNotebookApp> {
     _reminderService = ReminderService();
     _shareService = ShareService();
     _privacyLockService = PrivacyLockService();
+    _aiService = AiService();
 
     _notebookController = NotebookController(
       authService: _authService,
@@ -83,6 +86,7 @@ class _UniversalNotebookAppState extends State<UniversalNotebookApp> {
       reminderService: _reminderService,
       shareService: _shareService,
       privacyLockService: _privacyLockService,
+      aiService: _aiService,
     );
 
     _notebookController.initialize();

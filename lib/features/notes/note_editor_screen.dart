@@ -286,6 +286,80 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // AI assistance
+  // ---------------------------------------------------------------------------
+
+  Future<void> _runAi(String action) async {
+    final NotebookController controller = context.read<NotebookController>();
+    final NoteItem? note = controller.getNoteById(widget.noteId);
+    if (note == null) {
+      return;
+    }
+    await _saveNow();
+    if (!mounted) {
+      return;
+    }
+
+    final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      const SnackBar(
+        duration: Duration(seconds: 30),
+        content: Row(
+          children: <Widget>[
+            SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            SizedBox(width: 12),
+            Text('Asking the assistant...'),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      switch (action) {
+        case 'summarize':
+          final String summary =
+              await controller.summarizeText(_bodyController.text);
+          if (summary.isNotEmpty) {
+            _insertAt(0, '## Summary\n$summary\n\n');
+            await _saveNow();
+          }
+          break;
+        case 'cleanup':
+          final String cleaned =
+              await controller.cleanUpText(_bodyController.text);
+          if (cleaned.isNotEmpty) {
+            _bodyController.text = cleaned;
+            await _saveNow();
+          }
+          break;
+        case 'tags':
+          await controller.suggestAndAddTags(note);
+          break;
+      }
+      messenger.hideCurrentSnackBar();
+    } catch (error) {
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
+        SnackBar(content: Text('AI unavailable: $error')),
+      );
+    }
+  }
+
+  void _insertAt(int index, String snippet) {
+    final String text = _bodyController.text;
+    final int safeIndex = index.clamp(0, text.length);
+    final String newText = text.replaceRange(safeIndex, safeIndex, snippet);
+    _bodyController.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: safeIndex + snippet.length),
+    );
+  }
+
   Future<void> _setReminder() async {
     final NotebookController controller = context.read<NotebookController>();
     final NoteItem? note = controller.getNoteById(widget.noteId);
@@ -484,6 +558,27 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
           appBar: AppBar(
             title: const Text('Edit Note'),
             actions: <Widget>[
+              if (controller.aiAvailable)
+                PopupMenuButton<String>(
+                  tooltip: 'AI assist',
+                  icon: const Icon(Icons.auto_awesome_outlined),
+                  onSelected: _runAi,
+                  itemBuilder: (BuildContext context) =>
+                      <PopupMenuEntry<String>>[
+                    const PopupMenuItem<String>(
+                      value: 'summarize',
+                      child: Text('Summarize into note'),
+                    ),
+                    const PopupMenuItem<String>(
+                      value: 'cleanup',
+                      child: Text('Clean up writing'),
+                    ),
+                    const PopupMenuItem<String>(
+                      value: 'tags',
+                      child: Text('Suggest tags'),
+                    ),
+                  ],
+                ),
               IconButton(
                 tooltip: _isListening ? 'Stop dictation' : 'Speech to text',
                 onPressed: controller.speechAvailable ? _toggleSpeech : null,

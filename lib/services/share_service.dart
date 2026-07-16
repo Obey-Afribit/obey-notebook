@@ -1,21 +1,22 @@
-import 'dart:io';
 import 'dart:convert';
+import 'dart:typed_data';
 
-import 'package:path_provider/path_provider.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:share_plus/share_plus.dart';
 
 import '../core/models/folder_item.dart';
 import '../core/models/note_item.dart';
 import '../core/models/template_item.dart';
+import 'file_saver.dart';
 
+/// Sharing and export. Free of dart:io so it compiles on web; file writing is
+/// delegated to the platform-specific [saveOrShareFile].
 class ShareService {
   Future<void> shareNoteText({
     required String title,
     required String body,
   }) {
-    final String content = '$title\n\n$body';
-    return Share.share(content, subject: title);
+    return Share.share('$title\n\n$body', subject: title);
   }
 
   Future<void> shareNoteWithImages({
@@ -24,34 +25,28 @@ class ShareService {
     required List<String> imagePaths,
   }) async {
     final String content = '$title\n\n$body';
-    final List<XFile> files = imagePaths
-        .map((String path) => XFile(path))
-        .where((XFile file) => File(file.path).existsSync())
-        .toList(growable: false);
-
-    if (files.isEmpty) {
+    if (imagePaths.isEmpty) {
       await Share.share(content, subject: title);
       return;
     }
 
+    final List<XFile> files =
+        imagePaths.map((String path) => XFile(path)).toList(growable: false);
     await Share.shareXFiles(files, text: content, subject: title);
   }
 
-  Future<String> exportNoteAsTxt(NoteItem note) async {
-    final Directory dir = await getTemporaryDirectory();
-    final String fileName =
-        '${_safeName(note.title)}_${DateTime.now().millisecondsSinceEpoch}.txt';
-    final File file = File('${dir.path}${Platform.pathSeparator}$fileName');
-    await file.writeAsString('${note.title}\n\n${note.body}');
-    return file.path;
+  Future<void> exportNoteAsTxt(NoteItem note) async {
+    final Uint8List bytes =
+        Uint8List.fromList(utf8.encode('${note.title}\n\n${note.body}'));
+    await saveOrShareFile(
+      bytes: bytes,
+      fileName: '${_safeName(note.title)}.txt',
+      mimeType: 'text/plain',
+      subject: '${note.title} (TXT export)',
+    );
   }
 
-  Future<String> exportNoteAsPdf(NoteItem note) async {
-    final Directory dir = await getTemporaryDirectory();
-    final String fileName =
-        '${_safeName(note.title)}_${DateTime.now().millisecondsSinceEpoch}.pdf';
-    final File file = File('${dir.path}${Platform.pathSeparator}$fileName');
-
+  Future<void> exportNoteAsPdf(NoteItem note) async {
     final pw.Document doc = pw.Document();
     doc.addPage(
       pw.MultiPage(
@@ -69,44 +64,42 @@ class ShareService {
       ),
     );
 
-    await file.writeAsBytes(await doc.save());
-    return file.path;
-  }
-
-  Future<void> shareFilePath({
-    required String filePath,
-    String? text,
-    String? subject,
-  }) {
-    return Share.shareXFiles(
-      <XFile>[XFile(filePath)],
-      text: text,
-      subject: subject,
+    final Uint8List bytes = await doc.save();
+    await saveOrShareFile(
+      bytes: bytes,
+      fileName: '${_safeName(note.title)}.pdf',
+      mimeType: 'application/pdf',
+      subject: '${note.title} (PDF export)',
     );
   }
 
-  Future<String> exportBackupJson({
+  Future<void> exportBackupJson({
     required List<NoteItem> notes,
     required List<FolderItem> folders,
     required List<TemplateItem> templates,
   }) async {
-    final Directory dir = await getTemporaryDirectory();
-    final String fileName =
-        'universal_notebook_backup_${DateTime.now().millisecondsSinceEpoch}.json';
-    final File file = File('${dir.path}${Platform.pathSeparator}$fileName');
-
     final Map<String, dynamic> payload = <String, dynamic>{
       'exportedAt': DateTime.now().toUtc().toIso8601String(),
-      'notes': notes.map((NoteItem note) => note.toMap()).toList(growable: false),
-      'folders':
-          folders.map((FolderItem folder) => folder.toMap()).toList(growable: false),
+      'notes':
+          notes.map((NoteItem note) => note.toMap()).toList(growable: false),
+      'folders': folders
+          .map((FolderItem folder) => folder.toMap())
+          .toList(growable: false),
       'templates': templates
           .map((TemplateItem template) => template.toMap())
           .toList(growable: false),
     };
 
-    await file.writeAsString(const JsonEncoder.withIndent('  ').convert(payload));
-    return file.path;
+    final Uint8List bytes = Uint8List.fromList(
+      utf8.encode(const JsonEncoder.withIndent('  ').convert(payload)),
+    );
+    await saveOrShareFile(
+      bytes: bytes,
+      fileName:
+          'universal_notebook_backup_${DateTime.now().millisecondsSinceEpoch}.json',
+      mimeType: 'application/json',
+      subject: 'Universal Notebook data backup',
+    );
   }
 
   String _safeName(String value) {
