@@ -23,10 +23,16 @@ subprojects {
 // SDK 36. Newer plugin versions (flutter_plugin_android_lifecycle, file_picker,
 // etc.) require compileSdk 36, but the Flutter tool still hands plugins its
 // default (34). This override keeps every module consistent.
+//
+// evaluationDependsOn(":app") above eagerly evaluates some modules, so a plain
+// afterEvaluate would throw "project already evaluated". Guard on state.executed:
+// configure now if already evaluated, otherwise defer.
 subprojects {
-    afterEvaluate {
-        extensions.findByName("android")?.withGroovyBuilder {
-            "compileSdkVersion"(36)
+    if (state.executed) {
+        extensions.findByName("android")?.withGroovyBuilder { "compileSdkVersion"(36) }
+    } else {
+        afterEvaluate {
+            extensions.findByName("android")?.withGroovyBuilder { "compileSdkVersion"(36) }
         }
     }
 }
