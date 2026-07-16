@@ -58,7 +58,7 @@ class ShareService {
         build: (pw.Context context) => <pw.Widget>[
           pw.Text(
             note.title,
-            style: pw.TextStyle(
+            style: const pw.TextStyle(
               fontSize: 24,
               fontWeight: pw.FontWeight.bold,
             ),

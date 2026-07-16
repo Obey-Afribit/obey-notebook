@@ -23,7 +23,11 @@ class NoteItem {
   final String ownerId;
   final String folderId;
   final String title;
+
+  /// Note content as Markdown source. Rendered live in the editor's preview
+  /// and used directly for search, list previews, export, sharing, and AI.
   final String body;
+
   final DateTime createdAt;
   final DateTime updatedAt;
   final DateTime? reminderAt;

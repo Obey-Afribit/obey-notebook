@@ -24,7 +24,8 @@ Future<void> main() async {
     try {
       await Supabase.initialize(
         url: AppConfig.supabaseUrl,
-        anonKey: AppConfig.supabaseAnonKey,
+        // Accepts either an anon key or the newer publishable key.
+        publishableKey: AppConfig.supabaseAnonKey,
       );
     } catch (_) {
       // If cloud init fails, the app continues in local-only mode.

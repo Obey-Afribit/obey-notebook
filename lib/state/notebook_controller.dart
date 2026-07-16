@@ -552,6 +552,14 @@ class NotebookController extends ChangeNotifier {
     await saveNote(note.copyWith(body: merged));
   }
 
+  /// Extracts text from an image without mutating the note. The rich text
+  /// editor uses this to insert OCR results directly into the document.
+  Future<String> extractTextFromImage(String imagePath) {
+    return _ocrService.extractTextFromImagePath(imagePath);
+  }
+
+  bool get ocrSupported => _ocrService.isSupported;
+
   Future<void> shareNote(NoteItem note) {
     return _shareService.shareNoteWithImages(
       title: note.title,
