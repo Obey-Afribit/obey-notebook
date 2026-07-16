@@ -6,7 +6,9 @@ plugins {
 
 android {
     namespace = "com.obeynotebook.universal_notebook"
-    compileSdk = flutter.compileSdkVersion
+    // Pinned to 36: CI's latest-stable Flutter pulls plugins (e.g.
+    // flutter_plugin_android_lifecycle) that require compiling against API 36+.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
