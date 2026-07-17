@@ -591,6 +591,16 @@ class NotebookController extends ChangeNotifier {
     await saveNote(note.copyWith(imagePaths: updatedPaths));
   }
 
+  Future<void> removeImageFromNote({
+    required NoteItem note,
+    required String imagePath,
+  }) async {
+    final List<String> updatedPaths = note.imagePaths
+        .where((String path) => path != imagePath)
+        .toList(growable: false);
+    await saveNote(note.copyWith(imagePaths: updatedPaths));
+  }
+
   /// Inline images are stored in Supabase Storage, which requires a signed-in
   /// cloud session. In local-only mode there is nowhere to host them.
   bool get imagesSupported => _cloudConfigured && _isSignedIn;

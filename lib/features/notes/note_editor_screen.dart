@@ -10,6 +10,7 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/models/note_item.dart';
+import '../../services/camera_capture.dart';
 import '../../state/notebook_controller.dart';
 
 enum _ViewMode { edit, split, preview }
@@ -248,13 +249,37 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       return;
     }
 
-    final XFile? picked = await _picker.pickImage(
-      source: source,
-      maxWidth: 1600,
-      maxHeight: 1600,
-      imageQuality: 82,
-    );
-    if (picked == null || !mounted) {
+    // Resolve the image bytes from the chosen source. On the web the camera has
+    // to come from a live getUserMedia capture (browsers don't open a real
+    // camera from a file input on desktop); everywhere else image_picker's
+    // native camera/gallery is used.
+    Uint8List? bytes;
+    String extension = 'jpg';
+    String? localPath; // for optional OCR on mobile
+
+    if (source == ImageSource.camera && kIsWeb) {
+      bytes = await captureFromWebcam(context);
+      if (bytes == null) {
+        return; // cancelled or camera unavailable
+      }
+    } else {
+      final XFile? picked = await _picker.pickImage(
+        source: source,
+        maxWidth: 1600,
+        maxHeight: 1600,
+        imageQuality: 82,
+      );
+      if (picked == null) {
+        return;
+      }
+      bytes = await picked.readAsBytes();
+      extension = _extensionOf(picked.name);
+      if (!kIsWeb) {
+        localPath = picked.path;
+      }
+    }
+
+    if (!mounted) {
       return;
     }
 
@@ -277,11 +302,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     );
 
     try {
-      final Uint8List bytes = await picked.readAsBytes();
       final String url = await controller.uploadNoteImage(
         noteId: widget.noteId,
         bytes: bytes,
-        fileExtension: _extensionOf(picked.name),
+        fileExtension: extension,
       );
 
       // Embed inline at the cursor so it renders in the Markdown preview, and
@@ -294,15 +318,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       await _saveNow();
 
       messenger.hideCurrentSnackBar();
-      final bool canOcr =
-          !kIsWeb && picked.path.isNotEmpty && controller.ocrSupported;
+      final bool canOcr = localPath != null &&
+          localPath.isNotEmpty &&
+          controller.ocrSupported;
       messenger.showSnackBar(
         SnackBar(
           content: const Text('Image added.'),
           action: canOcr
               ? SnackBarAction(
                   label: 'OCR',
-                  onPressed: () => _runOcr(picked.path),
+                  onPressed: () => _runOcr(localPath!),
                 )
               : null,
         ),
@@ -357,6 +382,53 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
       return 'jpg';
     }
     return fileName.substring(dot + 1);
+  }
+
+  Future<void> _viewImage(String path) async {
+    if (!path.startsWith('http')) {
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return Dialog(
+          backgroundColor: Colors.black,
+          insetPadding: const EdgeInsets.all(12),
+          child: Stack(
+            children: <Widget>[
+              InteractiveViewer(
+                maxScale: 5,
+                child: Center(child: Image.network(path)),
+              ),
+              Positioned(
+                top: 4,
+                right: 4,
+                child: IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white),
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _removeImage(NoteItem note, String url) async {
+    final NotebookController controller = context.read<NotebookController>();
+    // Strip the inline Markdown for this image from the body too, so the source
+    // and the attachment list stay in sync.
+    final RegExp pattern =
+        RegExp(r'!\[[^\]]*\]\(' + RegExp.escape(url) + r'\)\n?');
+    final String newBody = _bodyController.text
+        .replaceAll(pattern, '')
+        .replaceAll(RegExp(r'\n{3,}'), '\n\n');
+    if (newBody != _bodyController.text) {
+      _bodyController.text = newBody;
+    }
+    await controller.removeImageFromNote(note: note, imagePath: url);
+    await _saveNow();
   }
 
   Future<void> _runOcr(String path) async {
@@ -800,17 +872,22 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
                     child: _buildEditorBody(effectiveMode),
                   ),
                   if (note.imagePaths.isNotEmpty) ...<Widget>[
-                    const SizedBox(height: 6),
-                    Row(
-                      children: <Widget>[
-                        const Icon(Icons.attach_file, size: 16),
-                        const SizedBox(width: 6),
-                        Text(
-                          '${note.imagePaths.length} attachment'
-                          '${note.imagePaths.length == 1 ? '' : 's'}',
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ],
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      height: 78,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: note.imagePaths.length,
+                        separatorBuilder: (_, __) => const SizedBox(width: 8),
+                        itemBuilder: (BuildContext context, int index) {
+                          final String path = note.imagePaths[index];
+                          return _AttachmentThumb(
+                            path: path,
+                            onTap: () => _viewImage(path),
+                            onRemove: () => _removeImage(note, path),
+                          );
+                        },
+                      ),
                     ),
                   ],
                 ],
@@ -886,6 +963,88 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
               selectable: true,
               padding: EdgeInsets.zero,
             ),
+    );
+  }
+}
+
+class _AttachmentThumb extends StatelessWidget {
+  const _AttachmentThumb({
+    required this.path,
+    required this.onTap,
+    required this.onRemove,
+  });
+
+  final String path;
+  final VoidCallback onTap;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    return Stack(
+      children: <Widget>[
+        ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: GestureDetector(
+            onTap: onTap,
+            child: SizedBox(
+              width: 78,
+              height: 78,
+              child: path.startsWith('http')
+                  ? Image.network(
+                      path,
+                      fit: BoxFit.cover,
+                      loadingBuilder: (BuildContext context, Widget child,
+                          ImageChunkEvent? progress) {
+                        if (progress == null) {
+                          return child;
+                        }
+                        return Container(
+                          color: scheme.surfaceContainerHighest,
+                          alignment: Alignment.center,
+                          child: const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child:
+                                CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                        );
+                      },
+                      errorBuilder: (BuildContext context, Object error,
+                          StackTrace? stack) {
+                        return Container(
+                          color: scheme.surfaceContainerHighest,
+                          alignment: Alignment.center,
+                          child: Icon(Icons.broken_image_outlined,
+                              color: scheme.onSurfaceVariant),
+                        );
+                      },
+                    )
+                  : Container(
+                      color: scheme.surfaceContainerHighest,
+                      alignment: Alignment.center,
+                      child: Icon(Icons.image_outlined,
+                          color: scheme.onSurfaceVariant),
+                    ),
+            ),
+          ),
+        ),
+        Positioned(
+          top: 2,
+          right: 2,
+          child: GestureDetector(
+            onTap: onRemove,
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Colors.black54,
+                shape: BoxShape.circle,
+              ),
+              padding: const EdgeInsets.all(2),
+              child: const Icon(Icons.close, size: 14, color: Colors.white),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

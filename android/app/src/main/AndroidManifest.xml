@@ -1,4 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Release builds only include the main manifest; without these the
+         release APK has no network access (cloud sign-in / sync / image upload
+         all fail with "Failed host lookup"). Debug/profile manifests add
+         INTERNET automatically, which is why this only bit the release APK. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <application
         android:label="universal_notebook"
         android:name="${applicationName}"
