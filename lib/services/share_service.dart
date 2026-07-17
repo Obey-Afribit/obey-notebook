@@ -25,14 +25,53 @@ class ShareService {
     required List<String> imagePaths,
   }) async {
     final String content = '$title\n\n$body';
-    if (imagePaths.isEmpty) {
+    final List<XFile> files = _localImageFiles(imagePaths);
+    if (files.isEmpty) {
       await Share.share(content, subject: title);
       return;
     }
 
-    final List<XFile> files =
-        imagePaths.map((String path) => XFile(path)).toList(growable: false);
     await Share.shareXFiles(files, text: content, subject: title);
+  }
+
+  /// Shares several notes at once (used by multi-select bulk actions). Bodies
+  /// are concatenated with a divider; any local image attachments ride along.
+  Future<void> shareNotes(List<NoteItem> notes) async {
+    if (notes.isEmpty) {
+      return;
+    }
+    if (notes.length == 1) {
+      await shareNoteWithImages(
+        title: notes.first.title,
+        body: notes.first.body,
+        imagePaths: notes.first.imagePaths,
+      );
+      return;
+    }
+
+    final String content = notes
+        .map((NoteItem note) => '${note.title}\n\n${note.body}')
+        .join('\n\n${'-' * 24}\n\n');
+    final String subject = '${notes.length} notes';
+
+    final List<String> allImagePaths = <String>[
+      for (final NoteItem note in notes) ...note.imagePaths,
+    ];
+    final List<XFile> files = _localImageFiles(allImagePaths);
+    if (files.isEmpty) {
+      await Share.share(content, subject: subject);
+      return;
+    }
+    await Share.shareXFiles(files, text: content, subject: subject);
+  }
+
+  /// Only on-device files can be attached to a share sheet; remote (http) image
+  /// URLs are left in the text body instead of being wrapped as [XFile]s.
+  List<XFile> _localImageFiles(List<String> imagePaths) {
+    return imagePaths
+        .where((String path) => !path.startsWith('http'))
+        .map((String path) => XFile(path))
+        .toList(growable: false);
   }
 
   Future<void> exportNoteAsTxt(NoteItem note) async {

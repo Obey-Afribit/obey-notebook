@@ -14,28 +14,37 @@ class NotesDashboard extends StatelessWidget {
   Widget build(BuildContext context) {
     final NotebookController controller = context.watch<NotebookController>();
 
-    return LayoutBuilder(
-      builder: (BuildContext context, BoxConstraints constraints) {
-        final bool wide = constraints.maxWidth > 900;
+    return PopScope(
+      canPop: !controller.selectionMode,
+      onPopInvokedWithResult: (bool didPop, Object? result) {
+        if (!didPop && controller.selectionMode) {
+          controller.clearSelection();
+        }
+      },
+      child: LayoutBuilder(
+        builder: (BuildContext context, BoxConstraints constraints) {
+          final bool wide = constraints.maxWidth > 900;
 
-        if (wide) {
-          return Row(
+          if (wide) {
+            return Row(
+              children: <Widget>[
+                SizedBox(
+                    width: 288, child: _FolderPanel(controller: controller)),
+                const VerticalDivider(width: 1),
+                Expanded(child: _NotesPanel(controller: controller)),
+              ],
+            );
+          }
+
+          return Column(
             children: <Widget>[
-              SizedBox(width: 288, child: _FolderPanel(controller: controller)),
-              const VerticalDivider(width: 1),
+              _CompactFolderSelector(controller: controller),
+              const Divider(height: 1),
               Expanded(child: _NotesPanel(controller: controller)),
             ],
           );
-        }
-
-        return Column(
-          children: <Widget>[
-            _CompactFolderSelector(controller: controller),
-            const Divider(height: 1),
-            Expanded(child: _NotesPanel(controller: controller)),
-          ],
-        );
-      },
+        },
+      ),
     );
   }
 }
@@ -43,6 +52,7 @@ class NotesDashboard extends StatelessWidget {
 /// Turns Markdown source into a clean one-glance preview snippet.
 String _previewText(String body) {
   final String stripped = body
+      .replaceAll(RegExp(r'!\[[^\]]*\]\([^)]*\)'), '') // inline images
       .replaceAll(RegExp(r'^#{1,6}\s+', multiLine: true), '')
       .replaceAll(RegExp(r'^\s*[-*+]\s+\[[ xX]\]\s*', multiLine: true), '')
       .replaceAll(RegExp(r'^\s*[-*+]\s+', multiLine: true), '')
@@ -253,62 +263,65 @@ class _NotesPanel extends StatelessWidget {
               onAction: controller.isBusy ? null : controller.retryCloudSetup,
             ),
           ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-          child: Column(
-            children: <Widget>[
-              TextField(
-                decoration: const InputDecoration(
-                  hintText: 'Search notes, tags, content...',
-                  prefixIcon: Icon(Icons.search),
+        if (controller.selectionMode)
+          _SelectionBar(controller: controller)
+        else
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            child: Column(
+              children: <Widget>[
+                TextField(
+                  decoration: const InputDecoration(
+                    hintText: 'Search notes, tags, content...',
+                    prefixIcon: Icon(Icons.search),
+                  ),
+                  onChanged: controller.setSearchQuery,
                 ),
-                onChanged: controller.setSearchQuery,
-              ),
-              const SizedBox(height: 10),
-              Row(
-                children: <Widget>[
-                  Expanded(
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        children: <Widget>[
-                          FilterChip(
-                            label: const Text('Archived'),
-                            selected: controller.showArchived,
-                            onSelected: controller.setShowArchived,
-                          ),
-                          const SizedBox(width: 8),
-                          FilterChip(
-                            label: const Text('Has images'),
-                            selected: controller.hasImageFilter,
-                            onSelected: controller.setHasImageFilter,
-                          ),
-                          const SizedBox(width: 8),
-                          ActionChip(
-                            avatar: const Icon(Icons.date_range, size: 18),
-                            label: Text(
-                              controller.filterStartDate == null
-                                  ? 'Date'
-                                  : 'Date set',
+                const SizedBox(height: 10),
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: <Widget>[
+                            FilterChip(
+                              label: const Text('Archived'),
+                              selected: controller.showArchived,
+                              onSelected: controller.setShowArchived,
                             ),
-                            onPressed: () =>
-                                _showDateFilter(context, controller),
-                          ),
-                        ],
+                            const SizedBox(width: 8),
+                            FilterChip(
+                              label: const Text('Has images'),
+                              selected: controller.hasImageFilter,
+                              onSelected: controller.setHasImageFilter,
+                            ),
+                            const SizedBox(width: 8),
+                            ActionChip(
+                              avatar: const Icon(Icons.date_range, size: 18),
+                              label: Text(
+                                controller.filterStartDate == null
+                                    ? 'Date'
+                                    : 'Date set',
+                              ),
+                              onPressed: () =>
+                                  _showDateFilter(context, controller),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  ActionChip(
-                    avatar: const Icon(Icons.delete_outline, size: 18),
-                    label: Text('Trash (${controller.trashNotes.length})'),
-                    onPressed: () => _showTrashDialog(context, controller),
-                  ),
-                ],
-              ),
-            ],
+                    const SizedBox(width: 8),
+                    ActionChip(
+                      avatar: const Icon(Icons.delete_outline, size: 18),
+                      label: Text('Trash (${controller.trashNotes.length})'),
+                      onPressed: () => _showTrashDialog(context, controller),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
-        ),
         Expanded(
           child: notes.isEmpty
               ? const _EmptyState()
@@ -362,15 +375,33 @@ class _NoteCard extends StatelessWidget {
     final String updated =
         DateFormat('d MMM, HH:mm').format(note.updatedAt.toLocal());
     final bool isConflict = note.conflictGroupId != null;
+    final bool selectionMode = controller.selectionMode;
+    final bool selected = controller.isNoteSelected(note.id);
 
     return Card(
       clipBehavior: Clip.antiAlias,
+      color: selected ? scheme.primaryContainer.withValues(alpha: 0.4) : null,
+      shape: selected
+          ? RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+              side: BorderSide(color: scheme.primary, width: 2),
+            )
+          : null,
       child: InkWell(
-        onTap: () => Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => NoteEditorScreen(noteId: note.id),
-          ),
-        ),
+        onTap: () {
+          if (selectionMode) {
+            controller.toggleNoteSelection(note.id);
+          } else {
+            Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => NoteEditorScreen(noteId: note.id),
+              ),
+            );
+          }
+        },
+        onLongPress: selectionMode
+            ? null
+            : () => controller.enterSelectionMode(note.id),
         child: Padding(
           padding: const EdgeInsets.all(14),
           child: Column(
@@ -378,6 +409,18 @@ class _NoteCard extends StatelessWidget {
             children: <Widget>[
               Row(
                 children: <Widget>[
+                  if (selectionMode)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: Icon(
+                        selected
+                            ? Icons.check_circle
+                            : Icons.radio_button_unchecked,
+                        size: 20,
+                        color:
+                            selected ? scheme.primary : scheme.onSurfaceVariant,
+                      ),
+                    ),
                   if (isConflict)
                     Padding(
                       padding: const EdgeInsets.only(right: 6),
@@ -396,7 +439,8 @@ class _NoteCard extends StatelessWidget {
                   ),
                   if (note.isPinned)
                     Icon(Icons.push_pin, size: 16, color: scheme.primary),
-                  _NoteMenu(note: note, controller: controller),
+                  if (!selectionMode)
+                    _NoteMenu(note: note, controller: controller),
                 ],
               ),
               const SizedBox(height: 6),
@@ -490,6 +534,98 @@ class _NoteMenu extends StatelessWidget {
   }
 }
 
+class _SelectionBar extends StatelessWidget {
+  const _SelectionBar({required this.controller});
+
+  final NotebookController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    final int count = controller.selectedCount;
+    final bool hasSelection = count > 0;
+
+    return Material(
+      color: scheme.primaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(4, 6, 4, 6),
+        child: Row(
+          children: <Widget>[
+            IconButton(
+              tooltip: 'Cancel',
+              icon: const Icon(Icons.close),
+              onPressed: controller.clearSelection,
+            ),
+            Expanded(
+              child: Text(
+                '$count selected',
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: scheme.onPrimaryContainer,
+                    ),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Move to folder',
+              icon: const Icon(Icons.drive_file_move_outline),
+              onPressed:
+                  hasSelection ? () => _showMoveSheet(context, controller) : null,
+            ),
+            IconButton(
+              tooltip: 'Share',
+              icon: const Icon(Icons.share_outlined),
+              onPressed: hasSelection ? controller.shareSelected : null,
+            ),
+            IconButton(
+              tooltip: 'Move to trash',
+              icon: const Icon(Icons.delete_outline),
+              onPressed: hasSelection
+                  ? () => _confirmBulkDelete(context, controller)
+                  : null,
+            ),
+            PopupMenuButton<String>(
+              tooltip: 'More',
+              icon: const Icon(Icons.more_vert),
+              onSelected: (String value) {
+                switch (value) {
+                  case 'select_all':
+                    controller.selectAllNotes(
+                      controller.filteredNotes
+                          .map((NoteItem note) => note.id),
+                    );
+                    break;
+                  case 'archive':
+                    controller.archiveSelected();
+                    break;
+                }
+              },
+              itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+                const PopupMenuItem<String>(
+                  value: 'select_all',
+                  child: ListTile(
+                    dense: true,
+                    leading: Icon(Icons.select_all),
+                    title: Text('Select all'),
+                  ),
+                ),
+                PopupMenuItem<String>(
+                  value: 'archive',
+                  enabled: hasSelection,
+                  child: const ListTile(
+                    dense: true,
+                    leading: Icon(Icons.archive_outlined),
+                    title: Text('Archive'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _EmptyState extends StatelessWidget {
   const _EmptyState();
 
@@ -552,6 +688,86 @@ class _InfoBanner extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+Future<void> _showMoveSheet(
+  BuildContext context,
+  NotebookController controller,
+) async {
+  final int count = controller.selectedCount;
+  final String? folderId = await showModalBottomSheet<String>(
+    context: context,
+    showDragHandle: true,
+    builder: (BuildContext sheetContext) {
+      return SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+              child: Text(
+                'Move $count note${count == 1 ? '' : 's'} to...',
+                style: Theme.of(sheetContext).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+              ),
+            ),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: controller.folders
+                    .map(
+                      (FolderItem folder) => ListTile(
+                        leading: const Icon(Icons.folder_outlined),
+                        title: Text(folder.name),
+                        onTap: () =>
+                            Navigator.of(sheetContext).pop(folder.id),
+                      ),
+                    )
+                    .toList(growable: false),
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      );
+    },
+  );
+
+  if (folderId != null) {
+    await controller.moveSelectedToFolder(folderId);
+  }
+}
+
+Future<void> _confirmBulkDelete(
+  BuildContext context,
+  NotebookController controller,
+) async {
+  final int count = controller.selectedCount;
+  final bool? confirmed = await showDialog<bool>(
+    context: context,
+    builder: (BuildContext dialogContext) {
+      return AlertDialog(
+        title: Text('Move $count note${count == 1 ? '' : 's'} to trash?'),
+        content: const Text('You can restore them from Trash afterwards.'),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Move to trash'),
+          ),
+        ],
+      );
+    },
+  );
+
+  if (confirmed == true) {
+    await controller.moveSelectedToTrash();
   }
 }
 

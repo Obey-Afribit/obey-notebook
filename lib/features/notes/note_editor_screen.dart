@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:typed_data';
 
-import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
@@ -25,6 +28,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
   final TextEditingController _titleController = TextEditingController();
   final TextEditingController _bodyController = TextEditingController();
   final FocusNode _bodyFocusNode = FocusNode();
+  final ImagePicker _picker = ImagePicker();
 
   Timer? _autosaveTimer;
   bool _isListening = false;
@@ -228,36 +232,131 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     return '$base $chunk';
   }
 
-  Future<void> _pickImage() async {
+  Future<void> _addImage() async {
     final NotebookController controller = context.read<NotebookController>();
-    final NoteItem? note = controller.getNoteById(widget.noteId);
-    if (note == null) {
+    if (!controller.imagesSupported) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Connect cloud sync to add images to your notes.'),
+        ),
+      );
       return;
     }
 
-    final FilePickerResult? result = await FilePicker.platform.pickFiles(
-      type: FileType.image,
-      withData: false,
+    final ImageSource? source = await _chooseImageSource();
+    if (source == null || !mounted) {
+      return;
+    }
+
+    final XFile? picked = await _picker.pickImage(
+      source: source,
+      maxWidth: 1600,
+      maxHeight: 1600,
+      imageQuality: 82,
     );
-    final String? pickedPath = result?.files.single.path;
-    if (pickedPath == null) {
+    if (picked == null || !mounted) {
       return;
     }
 
-    await controller.attachImageToNote(note: note, imagePath: pickedPath);
-
-    if (!mounted) {
-      return;
-    }
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: const Text('Image attached.'),
-        action: controller.ocrSupported
-            ? SnackBarAction(label: 'OCR', onPressed: () => _runOcr(pickedPath))
-            : null,
+    final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      const SnackBar(
+        duration: Duration(seconds: 30),
+        content: Row(
+          children: <Widget>[
+            SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            SizedBox(width: 12),
+            Text('Uploading image...'),
+          ],
+        ),
       ),
     );
+
+    try {
+      final Uint8List bytes = await picked.readAsBytes();
+      final String url = await controller.uploadNoteImage(
+        noteId: widget.noteId,
+        bytes: bytes,
+        fileExtension: _extensionOf(picked.name),
+      );
+
+      // Embed inline at the cursor so it renders in the Markdown preview, and
+      // also record it as an attachment (for the count + "Has images" filter).
+      _insertAtCursor('\n\n![image]($url)\n\n');
+      final NoteItem? note = controller.getNoteById(widget.noteId);
+      if (note != null) {
+        await controller.attachImageToNote(note: note, imagePath: url);
+      }
+      await _saveNow();
+
+      messenger.hideCurrentSnackBar();
+      final bool canOcr =
+          !kIsWeb && picked.path.isNotEmpty && controller.ocrSupported;
+      messenger.showSnackBar(
+        SnackBar(
+          content: const Text('Image added.'),
+          action: canOcr
+              ? SnackBarAction(
+                  label: 'OCR',
+                  onPressed: () => _runOcr(picked.path),
+                )
+              : null,
+        ),
+      );
+    } catch (error) {
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not add image: $error')),
+      );
+    }
+  }
+
+  Future<ImageSource?> _chooseImageSource() {
+    // image_picker supports the camera on mobile and web (getUserMedia), but
+    // not on desktop — offer gallery-only there.
+    final bool cameraSupported = kIsWeb ||
+        defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS;
+
+    return showModalBottomSheet<ImageSource>(
+      context: context,
+      showDragHandle: true,
+      builder: (BuildContext sheetContext) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              if (cameraSupported)
+                ListTile(
+                  leading: const Icon(Icons.photo_camera_outlined),
+                  title: const Text('Take a photo'),
+                  onTap: () =>
+                      Navigator.of(sheetContext).pop(ImageSource.camera),
+                ),
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('Choose from gallery'),
+                onTap: () =>
+                    Navigator.of(sheetContext).pop(ImageSource.gallery),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  String _extensionOf(String fileName) {
+    final int dot = fileName.lastIndexOf('.');
+    if (dot == -1 || dot == fileName.length - 1) {
+      return 'jpg';
+    }
+    return fileName.substring(dot + 1);
   }
 
   Future<void> _runOcr(String path) async {
@@ -586,7 +685,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
               ),
               IconButton(
                 tooltip: 'Insert image',
-                onPressed: _pickImage,
+                onPressed: _addImage,
                 icon: const Icon(Icons.image_outlined),
               ),
               IconButton(

@@ -15,6 +15,7 @@ import '../services/privacy_lock_service.dart';
 import '../services/reminder_service.dart';
 import '../services/share_service.dart';
 import '../services/speech_service.dart';
+import '../services/storage_service.dart';
 import '../services/sync_service.dart';
 import '../services/template_service.dart';
 
@@ -31,6 +32,7 @@ class NotebookController extends ChangeNotifier {
     required ShareService shareService,
     required PrivacyLockService privacyLockService,
     required AiService aiService,
+    required StorageService storageService,
   })  : _authService = authService,
         _localStoreService = localStoreService,
         _syncService = syncService,
@@ -41,7 +43,8 @@ class NotebookController extends ChangeNotifier {
         _reminderService = reminderService,
         _shareService = shareService,
         _privacyLockService = privacyLockService,
-        _aiService = aiService;
+        _aiService = aiService,
+        _storageService = storageService;
 
   final AuthService _authService;
   final LocalStoreService _localStoreService;
@@ -54,6 +57,7 @@ class NotebookController extends ChangeNotifier {
   final ShareService _shareService;
   final PrivacyLockService _privacyLockService;
   final AiService _aiService;
+  final StorageService _storageService;
 
   final Uuid _uuid = const Uuid();
 
@@ -76,6 +80,9 @@ class NotebookController extends ChangeNotifier {
   bool _showArchived = false;
   String? _selectedFolderId;
 
+  bool _selectionMode = false;
+  final Set<String> _selectedNoteIds = <String>{};
+
   List<NoteItem> _notes = <NoteItem>[];
   List<FolderItem> _folders = <FolderItem>[];
   List<TemplateItem> _templates = <TemplateItem>[];
@@ -97,6 +104,14 @@ class NotebookController extends ChangeNotifier {
   bool get hasImageFilter => _hasImageFilter;
   bool get showArchived => _showArchived;
   String? get selectedFolderId => _selectedFolderId;
+
+  bool get selectionMode => _selectionMode;
+  Set<String> get selectedNoteIds => _selectedNoteIds;
+  int get selectedCount => _selectedNoteIds.length;
+  bool isNoteSelected(String noteId) => _selectedNoteIds.contains(noteId);
+  List<NoteItem> get selectedNotes => _notes
+      .where((NoteItem note) => _selectedNoteIds.contains(note.id))
+      .toList(growable: false);
 
   List<NoteItem> get notes => _notes;
   List<FolderItem> get folders => _folders;
@@ -289,6 +304,8 @@ class NotebookController extends ChangeNotifier {
       _folders = <FolderItem>[];
       _templates = <TemplateItem>[];
       _selectedFolderId = null;
+      _selectedNoteIds.clear();
+      _selectionMode = false;
     });
   }
 
@@ -341,6 +358,8 @@ class NotebookController extends ChangeNotifier {
       _folders = <FolderItem>[];
       _templates = <TemplateItem>[];
       _selectedFolderId = null;
+      _selectedNoteIds.clear();
+      _selectionMode = false;
     });
   }
 
@@ -497,12 +516,98 @@ class NotebookController extends ChangeNotifier {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // Multi-select and bulk actions
+  // ---------------------------------------------------------------------------
+
+  void enterSelectionMode(String noteId) {
+    _selectionMode = true;
+    _selectedNoteIds.add(noteId);
+    notifyListeners();
+  }
+
+  void toggleNoteSelection(String noteId) {
+    if (!_selectedNoteIds.remove(noteId)) {
+      _selectedNoteIds.add(noteId);
+    }
+    _selectionMode = _selectedNoteIds.isNotEmpty;
+    notifyListeners();
+  }
+
+  void selectAllNotes(Iterable<String> noteIds) {
+    _selectedNoteIds.addAll(noteIds);
+    _selectionMode = _selectedNoteIds.isNotEmpty;
+    notifyListeners();
+  }
+
+  void clearSelection() {
+    if (!_selectionMode && _selectedNoteIds.isEmpty) {
+      return;
+    }
+    _selectedNoteIds.clear();
+    _selectionMode = false;
+    notifyListeners();
+  }
+
+  Future<void> moveSelectedToTrash() async {
+    for (final NoteItem note in selectedNotes) {
+      await moveToTrash(note);
+    }
+    clearSelection();
+  }
+
+  Future<void> archiveSelected() async {
+    for (final NoteItem note in selectedNotes) {
+      if (!note.isArchived) {
+        await archiveNote(note);
+      }
+    }
+    clearSelection();
+  }
+
+  Future<void> moveSelectedToFolder(String folderId) async {
+    for (final NoteItem note in selectedNotes) {
+      if (note.folderId != folderId) {
+        await saveNote(note.copyWith(folderId: folderId));
+      }
+    }
+    clearSelection();
+  }
+
+  Future<void> shareSelected() async {
+    final List<NoteItem> targets = selectedNotes;
+    if (targets.isEmpty) {
+      return;
+    }
+    await _shareService.shareNotes(targets);
+    clearSelection();
+  }
+
   Future<void> attachImageToNote({
     required NoteItem note,
     required String imagePath,
   }) async {
     final List<String> updatedPaths = <String>[...note.imagePaths, imagePath];
     await saveNote(note.copyWith(imagePaths: updatedPaths));
+  }
+
+  /// Inline images are stored in Supabase Storage, which requires a signed-in
+  /// cloud session. In local-only mode there is nowhere to host them.
+  bool get imagesSupported => _cloudConfigured && _isSignedIn;
+
+  /// Uploads image [bytes] to cloud storage and returns the public URL to embed
+  /// in the note's Markdown. Throws if cloud storage is unavailable.
+  Future<String> uploadNoteImage({
+    required String noteId,
+    required Uint8List bytes,
+    required String fileExtension,
+  }) {
+    return _storageService.uploadNoteImage(
+      userId: _activeUserId,
+      noteId: noteId,
+      bytes: bytes,
+      fileExtension: fileExtension,
+    );
   }
 
   Future<void> applyReminderToNote({

@@ -13,6 +13,7 @@ import 'services/privacy_lock_service.dart';
 import 'services/reminder_service.dart';
 import 'services/share_service.dart';
 import 'services/speech_service.dart';
+import 'services/storage_service.dart';
 import 'services/sync_service.dart';
 import 'services/template_service.dart';
 import 'state/notebook_controller.dart';
@@ -54,6 +55,7 @@ class _UniversalNotebookAppState extends State<UniversalNotebookApp> {
   late final ShareService _shareService;
   late final PrivacyLockService _privacyLockService;
   late final AiService _aiService;
+  late final StorageService _storageService;
   late final NotebookController _notebookController;
 
   @override
@@ -74,6 +76,7 @@ class _UniversalNotebookAppState extends State<UniversalNotebookApp> {
     _shareService = ShareService();
     _privacyLockService = PrivacyLockService();
     _aiService = AiService();
+    _storageService = const StorageService();
 
     _notebookController = NotebookController(
       authService: _authService,
@@ -87,6 +90,7 @@ class _UniversalNotebookAppState extends State<UniversalNotebookApp> {
       shareService: _shareService,
       privacyLockService: _privacyLockService,
       aiService: _aiService,
+      storageService: _storageService,
     );
 
     _notebookController.initialize();
