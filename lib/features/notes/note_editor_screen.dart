@@ -1,48 +1,56 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
-import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/list_continuation.dart';
+import '../../core/markdown_tools.dart';
 import '../../core/models/note_item.dart';
+import '../../core/theme/note_colors.dart';
+import '../../core/theme/theme_controller.dart';
 import '../../services/camera_capture.dart';
 import '../../state/notebook_controller.dart';
+import '../shared/sheets.dart';
+import '../shared/ui.dart';
+import 'markdown_view.dart';
 
-enum _ViewMode { edit, split, preview }
+enum _Mode { edit, read, split }
 
 class NoteEditorScreen extends StatefulWidget {
-  const NoteEditorScreen({super.key, required this.noteId});
+  const NoteEditorScreen({super.key, required this.noteId, this.isNew = false});
 
   final String noteId;
+
+  /// Created just now: opens in edit mode and is discarded if left empty.
+  final bool isNew;
 
   @override
   State<NoteEditorScreen> createState() => _NoteEditorScreenState();
 }
 
-class _NoteEditorScreenState extends State<NoteEditorScreen>
-    with WidgetsBindingObserver {
-  final TextEditingController _titleController = TextEditingController();
-  final TextEditingController _bodyController = TextEditingController();
-  final FocusNode _bodyFocusNode = FocusNode();
+class _NoteEditorScreenState extends State<NoteEditorScreen> {
+  final TextEditingController _title = TextEditingController();
+  final TextEditingController _body = TextEditingController();
+  final FocusNode _titleFocus = FocusNode();
+  final FocusNode _bodyFocus = FocusNode();
+  final UndoHistoryController _undo = UndoHistoryController();
   final ImagePicker _picker = ImagePicker();
 
-  Timer? _autosaveTimer;
-  bool _isListening = false;
+  late NotebookController _controller;
+  Timer? _autosave;
   bool _initialized = false;
-  _ViewMode _viewMode = _ViewMode.edit;
-  String _speechSessionBaseText = '';
-  String _lastFinalSpeechChunk = '';
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-  }
+  bool _dirty = false;
+  bool _saving = false;
+  bool _applyingRemote = false;
+  bool _listening = false;
+  bool _uploading = false;
+  String _speechBase = '';
+  _Mode _mode = _Mode.edit;
 
   @override
   void didChangeDependencies() {
@@ -50,306 +58,517 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     if (_initialized) {
       return;
     }
-
-    final NotebookController controller = context.read<NotebookController>();
-    final NoteItem? note = controller.getNoteById(widget.noteId);
-    if (note != null) {
-      _titleController.text = note.title;
-      _bodyController.text = note.body;
-      _titleController.addListener(_scheduleSave);
-      _bodyController.addListener(_onBodyChanged);
-      _initialized = true;
+    _controller = context.read<NotebookController>();
+    final NoteItem? note = _controller.getNoteById(widget.noteId);
+    if (note == null) {
+      return;
     }
-  }
+    _title.text = note.displayTitle;
+    _body.text = note.body;
+    _title.addListener(_onTextChanged);
+    _body.addListener(_onTextChanged);
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.detached) {
-      _saveNow();
+    final bool readByDefault =
+        context.read<ThemeController>().openInReadingView;
+    _mode = widget.isNew || note.isEmpty || !readByDefault
+        ? _Mode.edit
+        : _Mode.read;
+    if (note.isDeleted) {
+      _mode = _Mode.read;
     }
+    if (widget.isNew) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          (note.body.isEmpty ? _titleFocus : _bodyFocus).requestFocus();
+        }
+      });
+    }
+    _initialized = true;
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _autosaveTimer?.cancel();
-    _titleController.removeListener(_scheduleSave);
-    _bodyController.removeListener(_onBodyChanged);
-    _titleController.dispose();
-    _bodyController.dispose();
-    _bodyFocusNode.dispose();
+    _autosave?.cancel();
+    if (_listening) {
+      unawaited(_controller.stopSpeechCapture());
+    }
+    if (_initialized) {
+      unawaited(_finalize());
+    }
+    _title.removeListener(_onTextChanged);
+    _body.removeListener(_onTextChanged);
+    _title.dispose();
+    _body.dispose();
+    _titleFocus.dispose();
+    _bodyFocus.dispose();
+    _undo.dispose();
     super.dispose();
   }
 
-  void _onBodyChanged() {
-    if (_viewMode == _ViewMode.split) {
-      setState(() {}); // live-refresh the preview pane
+  /// Saves pending edits and drops the note if it was created and left empty.
+  Future<void> _finalize() async {
+    if (_dirty) {
+      await _saveNow();
     }
-    _scheduleSave();
+    if (widget.isNew) {
+      await _controller.discardIfEmpty(widget.noteId);
+    }
   }
 
-  void _scheduleSave() {
-    _autosaveTimer?.cancel();
-    _autosaveTimer = Timer(const Duration(milliseconds: 800), _saveNow);
+  // ---------------------------------------------------------------------------
+  // Saving
+  // ---------------------------------------------------------------------------
+
+  void _onTextChanged() {
+    if (_applyingRemote) {
+      return;
+    }
+    _dirty = true;
+    _autosave?.cancel();
+    _autosave = Timer(const Duration(milliseconds: 700), _saveNow);
+    if (_mode == _Mode.split && mounted) {
+      setState(() {}); // live preview
+    }
   }
 
   Future<void> _saveNow() async {
-    final NotebookController controller = context.read<NotebookController>();
-    final NoteItem? existing = controller.getNoteById(widget.noteId);
+    _autosave?.cancel();
+    if (!_dirty) {
+      return;
+    }
+    final NoteItem? existing = _controller.getNoteById(widget.noteId);
     if (existing == null) {
       return;
     }
+    final String title = _title.text;
+    final String body = _body.text;
+    _dirty = false;
+    if (existing.displayTitle == title.trim() && existing.body == body) {
+      return;
+    }
+    _saving = true;
+    try {
+      await _controller.saveNote(existing.copyWith(title: title, body: body));
+    } finally {
+      _saving = false;
+    }
+  }
 
-    final NoteItem updated = existing.copyWith(
-      title: _titleController.text.trim().isEmpty
-          ? 'Untitled note'
-          : _titleController.text.trim(),
-      body: _bodyController.text,
-      updatedAt: DateTime.now().toUtc(),
-      localOnly: true,
-    );
+  bool get _busyEditing =>
+      _dirty || _saving || (_autosave?.isActive ?? false);
 
-    await controller.saveNote(updated);
+  bool _matchesEditor(NoteItem note) =>
+      note.displayTitle == _title.text.trim() && note.body == _body.text;
+
+  /// Picks up edits made on another device (or by an action such as removing
+  /// an image) while this note is open. Never while typing or saving: until a
+  /// save completes the controller may still hold the previous copy.
+  void _adoptRemote(NoteItem seen) {
+    if (_busyEditing || _matchesEditor(seen)) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final NoteItem? note = _controller.getNoteById(widget.noteId);
+      if (!mounted || note == null || _busyEditing || _matchesEditor(note)) {
+        return;
+      }
+      _applyingRemote = true;
+      if (note.displayTitle != _title.text.trim()) {
+        _title.text = note.displayTitle;
+      }
+      if (note.body != _body.text) {
+        final int offset = _body.selection.baseOffset.clamp(0, note.body.length);
+        _body.value = TextEditingValue(
+          text: note.body,
+          selection: TextSelection.collapsed(offset: offset),
+        );
+      }
+      _applyingRemote = false;
+      setState(() {});
+    });
+  }
+
+  void _setMode(_Mode mode) {
+    if (mode == _mode) {
+      return;
+    }
+    if (_mode != _Mode.read) {
+      unawaited(_saveNow());
+    }
+    setState(() => _mode = mode);
+    if (mode != _Mode.read) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _bodyFocus.requestFocus());
+    }
   }
 
   // ---------------------------------------------------------------------------
-  // Markdown formatting helpers
+  // Formatting
   // ---------------------------------------------------------------------------
 
-  void _wrapSelection(String left, String right) {
-    final String text = _bodyController.text;
-    TextSelection sel = _bodyController.selection;
-    if (!sel.isValid) {
-      sel = TextSelection.collapsed(offset: text.length);
-    }
-    final String selected = sel.textInside(text);
-    final String replacement = '$left$selected$right';
-    final String newText = text.replaceRange(sel.start, sel.end, replacement);
-    final int cursor = selected.isEmpty
-        ? sel.start + left.length
-        : sel.start + replacement.length;
-    _bodyController.value = TextEditingValue(
-      text: newText,
-      selection: TextSelection.collapsed(offset: cursor),
-    );
-    _bodyFocusNode.requestFocus();
+  TextSelection _selection() {
+    final TextSelection sel = _body.selection;
+    return sel.isValid ? sel : TextSelection.collapsed(offset: _body.text.length);
   }
 
-  void _prefixLine(String prefix) {
-    final String text = _bodyController.text;
-    TextSelection sel = _bodyController.selection;
-    if (!sel.isValid) {
-      sel = TextSelection.collapsed(offset: text.length);
-    }
-    final int lineStart =
-        sel.start == 0 ? 0 : text.lastIndexOf('\n', sel.start - 1) + 1;
-    final String newText = text.replaceRange(lineStart, lineStart, prefix);
-    _bodyController.value = TextEditingValue(
-      text: newText,
-      selection: TextSelection.collapsed(offset: sel.start + prefix.length),
+  void _wrap(String left, String right, {String placeholder = 'text'}) {
+    final String text = _body.text;
+    final TextSelection sel = _selection();
+    final String inner = sel.textInside(text);
+    final String replacement = '$left${inner.isEmpty ? placeholder : inner}$right';
+    _body.value = TextEditingValue(
+      text: text.replaceRange(sel.start, sel.end, replacement),
+      selection: inner.isEmpty
+          ? TextSelection(
+              baseOffset: sel.start + left.length,
+              extentOffset: sel.start + left.length + placeholder.length,
+            )
+          : TextSelection.collapsed(offset: sel.start + replacement.length),
     );
-    _bodyFocusNode.requestFocus();
+    _bodyFocus.requestFocus();
   }
 
-  void _insertAtCursor(String snippet) {
-    final String text = _bodyController.text;
-    TextSelection sel = _bodyController.selection;
-    if (!sel.isValid) {
-      sel = TextSelection.collapsed(offset: text.length);
+  /// Adds [prefix] to the current line, replacing any existing heading or list
+  /// marker; applying the same prefix again removes it.
+  void _linePrefix(String prefix) {
+    final String text = _body.text;
+    final TextSelection sel = _selection();
+    final int lineStart = sel.start == 0 ? 0 : text.lastIndexOf('\n', sel.start - 1) + 1;
+    int lineEnd = text.indexOf('\n', lineStart);
+    if (lineEnd == -1) {
+      lineEnd = text.length;
     }
-    final String newText = text.replaceRange(sel.start, sel.end, snippet);
-    _bodyController.value = TextEditingValue(
-      text: newText,
+    final String line = text.substring(lineStart, lineEnd);
+    final RegExp existing = RegExp(r'^(#{1,6}\s+|[-*+]\s+\[[ xX]\]\s+|[-*+]\s+|\d+[.)]\s+|>\s?)');
+    final RegExpMatch? match = existing.firstMatch(line);
+    final String current = match?.group(0) ?? '';
+    final String stripped = line.substring(current.length);
+    final bool same = current.trim() == prefix.trim() && current.isNotEmpty;
+    final String next = same ? stripped : '$prefix$stripped';
+    final int delta = next.length - line.length;
+
+    _body.value = TextEditingValue(
+      text: text.replaceRange(lineStart, lineEnd, next),
+      selection: TextSelection.collapsed(
+        offset: (sel.end + delta).clamp(lineStart, lineStart + next.length),
+      ),
+    );
+    _bodyFocus.requestFocus();
+  }
+
+  void _insert(String snippet) {
+    final String text = _body.text;
+    final TextSelection sel = _selection();
+    _body.value = TextEditingValue(
+      text: text.replaceRange(sel.start, sel.end, snippet),
       selection: TextSelection.collapsed(offset: sel.start + snippet.length),
     );
-    _bodyFocusNode.requestFocus();
+    _bodyFocus.requestFocus();
+  }
+
+  void _insertLink() {
+    final TextSelection sel = _selection();
+    final String label = sel.textInside(_body.text);
+    const String url = 'https://';
+    final String snippet = '[${label.isEmpty ? 'link text' : label}]($url)';
+    final String text = _body.text;
+    _body.value = TextEditingValue(
+      text: text.replaceRange(sel.start, sel.end, snippet),
+      selection: TextSelection.collapsed(offset: sel.start + snippet.length - 1),
+    );
+    _bodyFocus.requestFocus();
+  }
+
+  void _toggleTask(int index) {
+    final String updated = MarkdownTools.toggleTask(_body.text, index);
+    if (updated != _body.text) {
+      _body.text = updated; // triggers autosave
+      HapticFeedback.selectionClick();
+      setState(() {});
+    }
   }
 
   // ---------------------------------------------------------------------------
-  // Dictation, images, OCR
+  // Note-level actions
   // ---------------------------------------------------------------------------
 
-  Future<void> _toggleSpeech() async {
-    final NotebookController controller = context.read<NotebookController>();
-
-    if (_isListening) {
-      await controller.stopSpeechCapture();
-      setState(() => _isListening = false);
-      await _saveNow();
-      return;
-    }
-
-    _speechSessionBaseText = _bodyController.text;
-    _lastFinalSpeechChunk = '';
-
-    try {
-      await controller.startSpeechCapture(
-        onResult: (result) {
-          final String words = result.words.trim();
-          if (words.isEmpty) {
-            return;
-          }
-          if (result.isFinal) {
-            if (_lastFinalSpeechChunk == words) {
-              return;
-            }
-            _lastFinalSpeechChunk = words;
-            _speechSessionBaseText =
-                _mergeSpeechText(_speechSessionBaseText, words);
-            _bodyController.text = _speechSessionBaseText;
-          } else {
-            _bodyController.text =
-                _mergeSpeechText(_speechSessionBaseText, words);
-          }
-          _bodyController.selection = TextSelection.fromPosition(
-            TextPosition(offset: _bodyController.text.length),
-          );
-        },
-      );
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Speech capture unavailable: $error')),
-      );
-      return;
-    }
-
-    setState(() => _isListening = true);
-  }
-
-  String _mergeSpeechText(String current, String incoming) {
-    final String base = current.trimRight();
-    final String chunk = incoming.trim();
-    if (base.isEmpty) {
-      return chunk;
-    }
-    if (chunk.isEmpty) {
-      return base;
-    }
-    return '$base $chunk';
-  }
-
-  Future<void> _addImage() async {
-    final NotebookController controller = context.read<NotebookController>();
-    if (!controller.imagesSupported) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Connect cloud sync to add images to your notes.'),
-        ),
-      );
-      return;
-    }
-
-    final ImageSource? source = await _chooseImageSource();
-    if (source == null || !mounted) {
-      return;
-    }
-
-    // Resolve the image bytes from the chosen source. On the web the camera has
-    // to come from a live getUserMedia capture (browsers don't open a real
-    // camera from a file input on desktop); everywhere else image_picker's
-    // native camera/gallery is used.
-    Uint8List? bytes;
-    String extension = 'jpg';
-    String? localPath; // for optional OCR on mobile
-
-    if (source == ImageSource.camera && kIsWeb) {
-      bytes = await captureFromWebcam(context);
-      if (bytes == null) {
-        return; // cancelled or camera unavailable
-      }
-    } else {
-      final XFile? picked = await _picker.pickImage(
-        source: source,
-        maxWidth: 1600,
-        maxHeight: 1600,
-        imageQuality: 82,
-      );
-      if (picked == null) {
-        return;
-      }
-      bytes = await picked.readAsBytes();
-      extension = _extensionOf(picked.name);
-      if (!kIsWeb) {
-        localPath = picked.path;
-      }
-    }
-
+  void _snack(String message) {
     if (!mounted) {
       return;
     }
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
 
-    final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
-    messenger.showSnackBar(
-      const SnackBar(
-        duration: Duration(seconds: 30),
-        content: Row(
-          children: <Widget>[
-            SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-            SizedBox(width: 12),
-            Text('Uploading image...'),
-          ],
-        ),
-      ),
-    );
+  NoteItem? get _note => _controller.getNoteById(widget.noteId);
 
-    try {
-      final String url = await controller.uploadNoteImage(
-        noteId: widget.noteId,
-        bytes: bytes,
-        fileExtension: extension,
-      );
-
-      // Embed inline at the cursor so it renders in the Markdown preview, and
-      // also record it as an attachment (for the count + "Has images" filter).
-      _insertAtCursor('\n\n![image]($url)\n\n');
-      final NoteItem? note = controller.getNoteById(widget.noteId);
-      if (note != null) {
-        await controller.attachImageToNote(note: note, imagePath: url);
-      }
+  Future<void> _pickColor(NoteItem note) async {
+    final ColorChoice? choice = await showNoteColorPicker(context, current: note.colorId);
+    if (choice != null) {
       await _saveNow();
+      await _controller.setNoteColor(_note ?? note, choice.colorId);
+    }
+  }
 
-      messenger.hideCurrentSnackBar();
-      final bool canOcr = localPath != null &&
-          localPath.isNotEmpty &&
-          controller.ocrSupported;
-      messenger.showSnackBar(
+  Future<void> _pickReminder(NoteItem note) async {
+    final DateTime? at = await showReminderPicker(context, current: note.reminderAt);
+    if (at == null) {
+      return;
+    }
+    if (at.isBefore(DateTime.now())) {
+      _snack('Pick a time in the future.');
+      return;
+    }
+    await _saveNow();
+    final bool allowed = await _controller.setReminder(_note ?? note, at);
+    if (!allowed) {
+      _snack('Reminder saved, but notifications are off. Allow them in your '
+          'phone settings to get an alert.');
+    } else {
+      _snack('Reminder set for ${reminderLabel(at)}.');
+    }
+  }
+
+  Future<void> _clearReminder(NoteItem note) async {
+    await _saveNow();
+    await _controller.clearReminder(_note ?? note);
+  }
+
+  Future<void> _editTags(NoteItem note) async {
+    final List<String>? tags = await showTagEditor(
+      context,
+      current: note.tags,
+      suggestions: _controller.tagCounts.map((MapEntry<String, int> e) => e.key).toList(),
+    );
+    if (tags != null) {
+      await _saveNow();
+      await _controller.setTags(_note ?? note, tags);
+    }
+  }
+
+  Future<void> _moveFolder(NoteItem note) async {
+    final String? folderId = await showFolderPicker(
+      context,
+      _controller,
+      currentFolderId: note.folderId,
+    );
+    if (folderId != null && folderId != note.folderId) {
+      await _saveNow();
+      await _controller.moveNoteToFolder(_note ?? note, folderId);
+    }
+  }
+
+  Future<void> _share() async {
+    await _saveNow();
+    final NoteItem? note = _note;
+    if (note != null) {
+      await _controller.shareNote(note);
+    }
+  }
+
+  Future<void> _moveToTrash(NoteItem note) async {
+    await _saveNow();
+    await _controller.moveToTrash(_note ?? note);
+    if (mounted) {
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: const Text('Image added.'),
-          action: canOcr
-              ? SnackBarAction(
-                  label: 'OCR',
-                  onPressed: () => _runOcr(localPath!),
-                )
-              : null,
+          content: const Text('Note moved to trash.'),
+          action: SnackBarAction(
+            label: 'Undo',
+            onPressed: () {
+              final NoteItem? trashed = _controller.getNoteById(note.id);
+              if (trashed != null) {
+                _controller.restoreFromTrash(trashed);
+              }
+            },
+          ),
         ),
-      );
-    } catch (error) {
-      messenger.hideCurrentSnackBar();
-      messenger.showSnackBar(
-        SnackBar(content: Text('Could not add image: $error')),
       );
     }
   }
 
-  Future<ImageSource?> _chooseImageSource() {
-    // image_picker supports the camera on mobile and web (getUserMedia), but
-    // not on desktop — offer gallery-only there.
+  Future<void> _onMenu(String action, NoteItem note) async {
+    switch (action) {
+      case 'image':
+        await _addImage();
+        break;
+      case 'dictate':
+        await _toggleDictation();
+        break;
+      case 'tags':
+        await _editTags(note);
+        break;
+      case 'move':
+        await _moveFolder(note);
+        break;
+      case 'share':
+        await _share();
+        break;
+      case 'template':
+        await _saveNow();
+        final NoteItem current = _note ?? note;
+        await _controller.saveCustomTemplate(
+          title: current.displayTitle.isEmpty ? 'My template' : current.displayTitle,
+          body: current.body,
+        );
+        _snack('Saved as a template.');
+        break;
+      case 'history':
+        await _showHistory();
+        break;
+      case 'txt':
+        await _saveNow();
+        await _controller.exportNoteAsTxt(_note ?? note);
+        break;
+      case 'pdf':
+        await _saveNow();
+        await _controller.exportNoteAsPdf(_note ?? note);
+        break;
+      case 'archive':
+        await _saveNow();
+        if (note.isArchived) {
+          await _controller.unarchiveNote(_note ?? note);
+          _snack('Note restored from the archive.');
+        } else {
+          await _controller.archiveNote(_note ?? note);
+          if (mounted) {
+            Navigator.of(context).pop();
+          }
+        }
+        break;
+      case 'trash':
+        await _moveToTrash(note);
+        break;
+      case 'ai_summary':
+      case 'ai_cleanup':
+      case 'ai_tags':
+        await _runAi(action, note);
+        break;
+    }
+  }
+
+  Future<void> _runAi(String action, NoteItem note) async {
+    final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
+    await _saveNow();
+    messenger.showSnackBar(
+      const SnackBar(
+        duration: Duration(seconds: 30),
+        content: Text('Asking the assistant...'),
+      ),
+    );
+    try {
+      switch (action) {
+        case 'ai_summary':
+          final String summary = await _controller.summarizeText(_body.text);
+          if (summary.isNotEmpty) {
+            _body.text = '## Summary\n\n$summary\n\n${_body.text}';
+          }
+          break;
+        case 'ai_cleanup':
+          final String cleaned = await _controller.cleanUpText(_body.text);
+          if (cleaned.isNotEmpty) {
+            _body.text = cleaned;
+          }
+          break;
+        case 'ai_tags':
+          await _controller.suggestAndAddTags(_note ?? note);
+          break;
+      }
+      messenger.hideCurrentSnackBar();
+    } catch (_) {
+      messenger.hideCurrentSnackBar();
+      _snack("The assistant isn't available right now.");
+    }
+  }
+
+  Future<void> _showHistory() async {
+    await _saveNow();
+    final List<NoteItem> versions = _controller.getVersionHistory(widget.noteId);
+    if (!mounted) {
+      return;
+    }
+    if (versions.length < 2) {
+      _snack('No earlier versions yet. Versions are kept as you edit over time.');
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (BuildContext sheetContext) {
+        return SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.75,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+                  child: Text('Version history',
+                      style: Theme.of(sheetContext).textTheme.titleMedium),
+                ),
+                Flexible(
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: versions.length,
+                    itemBuilder: (BuildContext context, int index) {
+                      final NoteItem version = versions[index];
+                      final bool current = index == 0;
+                      return ListTile(
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+                        title: Text(
+                          DateFormat('EEE d MMM y, HH:mm').format(version.updatedAt.toLocal()),
+                        ),
+                        subtitle: Text(
+                          MarkdownTools.previewText(version.body),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        trailing: current
+                            ? const Chip(label: Text('Current'))
+                            : TextButton(
+                                onPressed: () async {
+                                  await _controller.restoreVersion(
+                                    noteId: widget.noteId,
+                                    version: version,
+                                  );
+                                  if (sheetContext.mounted) {
+                                    Navigator.of(sheetContext).pop();
+                                  }
+                                  _snack('Version restored.');
+                                },
+                                child: const Text('Restore'),
+                              ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Images and dictation
+  // ---------------------------------------------------------------------------
+
+  Future<void> _addImage() async {
+    if (!_controller.imagesSupported) {
+      _snack('Sign in to cloud sync to add images to your notes.');
+      return;
+    }
     final bool cameraSupported = kIsWeb ||
         defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS;
 
-    return showModalBottomSheet<ImageSource>(
+    final ImageSource? source = await showModalBottomSheet<ImageSource>(
       context: context,
-      showDragHandle: true,
       builder: (BuildContext sheetContext) {
         return SafeArea(
           child: Column(
@@ -357,16 +576,16 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
             children: <Widget>[
               if (cameraSupported)
                 ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 24),
                   leading: const Icon(Icons.photo_camera_outlined),
                   title: const Text('Take a photo'),
-                  onTap: () =>
-                      Navigator.of(sheetContext).pop(ImageSource.camera),
+                  onTap: () => Navigator.of(sheetContext).pop(ImageSource.camera),
                 ),
               ListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 24),
                 leading: const Icon(Icons.photo_library_outlined),
-                title: const Text('Choose from gallery'),
-                onTap: () =>
-                    Navigator.of(sheetContext).pop(ImageSource.gallery),
+                title: const Text('Choose an image'),
+                onTap: () => Navigator.of(sheetContext).pop(ImageSource.gallery),
               ),
               const SizedBox(height: 8),
             ],
@@ -374,522 +593,217 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
         );
       },
     );
-  }
-
-  String _extensionOf(String fileName) {
-    final int dot = fileName.lastIndexOf('.');
-    if (dot == -1 || dot == fileName.length - 1) {
-      return 'jpg';
-    }
-    return fileName.substring(dot + 1);
-  }
-
-  Future<void> _viewImage(String path) async {
-    if (!path.startsWith('http')) {
+    if (source == null || !mounted) {
       return;
     }
-    await showDialog<void>(
-      context: context,
-      builder: (BuildContext dialogContext) {
-        return Dialog(
-          backgroundColor: Colors.black,
-          insetPadding: const EdgeInsets.all(12),
-          child: Stack(
-            children: <Widget>[
-              InteractiveViewer(
-                maxScale: 5,
-                child: Center(child: Image.network(path)),
-              ),
-              Positioned(
-                top: 4,
-                right: 4,
-                child: IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white),
-                  onPressed: () => Navigator.of(dialogContext).pop(),
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
+
+    Uint8List? bytes;
+    String extension = 'jpg';
+    if (source == ImageSource.camera && kIsWeb) {
+      bytes = await captureFromWebcam(context);
+    } else {
+      final XFile? picked = await _picker.pickImage(
+        source: source,
+        maxWidth: 1800,
+        maxHeight: 1800,
+        imageQuality: 82,
+      );
+      if (picked != null) {
+        bytes = await picked.readAsBytes();
+        final int dot = picked.name.lastIndexOf('.');
+        if (dot != -1 && dot < picked.name.length - 1) {
+          extension = picked.name.substring(dot + 1);
+        }
+      }
+    }
+    if (bytes == null || !mounted) {
+      return;
+    }
+
+    setState(() => _uploading = true);
+    try {
+      final String url = await _controller.uploadNoteImage(
+        noteId: widget.noteId,
+        bytes: bytes,
+        fileExtension: extension,
+      );
+      final String snippet = '\n\n![image]($url)\n\n';
+      if (_mode == _Mode.read) {
+        _body.text = '${_body.text.trimRight()}$snippet';
+      } else {
+        _insert(snippet);
+      }
+      await _saveNow();
+      final NoteItem? note = _note;
+      if (note != null) {
+        await _controller.attachImageToNote(note: note, imagePath: url);
+      }
+    } catch (_) {
+      _snack("The image couldn't be uploaded. Check your connection and try again.");
+    } finally {
+      if (mounted) {
+        setState(() => _uploading = false);
+      }
+    }
   }
 
   Future<void> _removeImage(NoteItem note, String url) async {
-    final NotebookController controller = context.read<NotebookController>();
-    // Strip the inline Markdown for this image from the body too, so the source
-    // and the attachment list stay in sync.
-    final RegExp pattern =
-        RegExp(r'!\[[^\]]*\]\(' + RegExp.escape(url) + r'\)\n?');
-    final String newBody = _bodyController.text
-        .replaceAll(pattern, '')
-        .replaceAll(RegExp(r'\n{3,}'), '\n\n');
-    if (newBody != _bodyController.text) {
-      _bodyController.text = newBody;
+    if (!await confirmAction(
+      context,
+      title: 'Remove image?',
+      message: 'It will be removed from this note and deleted from storage.',
+      confirmLabel: 'Remove',
+      destructive: true,
+    )) {
+      return;
     }
-    await controller.removeImageFromNote(note: note, imagePath: url);
     await _saveNow();
+    await _controller.removeImageFromNote(note: _note ?? note, imagePath: url);
   }
 
-  Future<void> _runOcr(String path) async {
-    final NotebookController controller = context.read<NotebookController>();
-    try {
-      final String extracted = await controller.extractTextFromImage(path);
-      if (extracted.trim().isEmpty) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('No text found (OCR runs on mobile builds).'),
-            ),
-          );
-        }
-        return;
-      }
-      _insertAtCursor('\n\n${extracted.trim()}\n');
+  Future<void> _toggleDictation() async {
+    if (_listening) {
+      await _controller.stopSpeechCapture();
+      setState(() => _listening = false);
       await _saveNow();
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('OCR unavailable: $error')),
-      );
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // AI assistance
-  // ---------------------------------------------------------------------------
-
-  Future<void> _runAi(String action) async {
-    final NotebookController controller = context.read<NotebookController>();
-    final NoteItem? note = controller.getNoteById(widget.noteId);
-    if (note == null) {
       return;
     }
-    await _saveNow();
-    if (!mounted) {
-      return;
+    if (_mode == _Mode.read) {
+      _setMode(_Mode.edit);
     }
-
-    final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
-    messenger.showSnackBar(
-      const SnackBar(
-        duration: Duration(seconds: 30),
-        content: Row(
-          children: <Widget>[
-            SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-            SizedBox(width: 12),
-            Text('Asking the assistant...'),
-          ],
-        ),
-      ),
-    );
-
+    _speechBase = _body.text;
     try {
-      switch (action) {
-        case 'summarize':
-          final String summary =
-              await controller.summarizeText(_bodyController.text);
-          if (summary.isNotEmpty) {
-            _insertAt(0, '## Summary\n$summary\n\n');
-            await _saveNow();
+      await _controller.startSpeechCapture(
+        onResult: (result) {
+          final String words = result.words.trim();
+          if (words.isEmpty) {
+            return;
           }
-          break;
-        case 'cleanup':
-          final String cleaned =
-              await controller.cleanUpText(_bodyController.text);
-          if (cleaned.isNotEmpty) {
-            _bodyController.text = cleaned;
-            await _saveNow();
+          final String base = _speechBase.trimRight();
+          final String merged = base.isEmpty ? words : '$base $words';
+          _body.value = TextEditingValue(
+            text: merged,
+            selection: TextSelection.collapsed(offset: merged.length),
+          );
+          if (result.isFinal) {
+            _speechBase = merged;
           }
-          break;
-        case 'tags':
-          await controller.suggestAndAddTags(note);
-          break;
-      }
-      messenger.hideCurrentSnackBar();
-    } catch (error) {
-      messenger.hideCurrentSnackBar();
-      messenger.showSnackBar(
-        SnackBar(content: Text('AI unavailable: $error')),
+        },
       );
+      setState(() => _listening = true);
+    } catch (error) {
+      _snack(error is StateError
+          ? error.message
+          : 'Dictation is unavailable on this device.');
     }
-  }
-
-  void _insertAt(int index, String snippet) {
-    final String text = _bodyController.text;
-    final int safeIndex = index.clamp(0, text.length);
-    final String newText = text.replaceRange(safeIndex, safeIndex, snippet);
-    _bodyController.value = TextEditingValue(
-      text: newText,
-      selection: TextSelection.collapsed(offset: safeIndex + snippet.length),
-    );
-  }
-
-  Future<void> _setReminder() async {
-    final NotebookController controller = context.read<NotebookController>();
-    final NoteItem? note = controller.getNoteById(widget.noteId);
-    if (note == null) {
-      return;
-    }
-
-    final DateTime now = DateTime.now();
-    final DateTime? pickedDate = await showDatePicker(
-      context: context,
-      firstDate: now,
-      lastDate: DateTime(now.year + 5),
-      initialDate: note.reminderAt?.toLocal() ?? now,
-    );
-    if (pickedDate == null || !mounted) {
-      return;
-    }
-
-    final TimeOfDay? pickedTime = await showTimePicker(
-      context: context,
-      initialTime: TimeOfDay.fromDateTime(note.reminderAt?.toLocal() ?? now),
-    );
-    if (pickedTime == null) {
-      return;
-    }
-
-    final DateTime reminderAt = DateTime(
-      pickedDate.year,
-      pickedDate.month,
-      pickedDate.day,
-      pickedTime.hour,
-      pickedTime.minute,
-    );
-
-    await controller.applyReminderToNote(
-      note: note,
-      reminderAt: reminderAt.toUtc(),
-    );
-    if (mounted) {
-      setState(() {});
-    }
-  }
-
-  Future<void> _shareNote() async {
-    final NotebookController controller = context.read<NotebookController>();
-    await _saveNow();
-    final NoteItem? note = controller.getNoteById(widget.noteId);
-    if (note == null) {
-      return;
-    }
-    await controller.shareNote(note);
-  }
-
-  Future<void> _moveToTrash() async {
-    final NotebookController controller = context.read<NotebookController>();
-    final NoteItem? note = controller.getNoteById(widget.noteId);
-    if (note == null) {
-      return;
-    }
-    await controller.moveToTrash(note);
-    if (mounted) {
-      Navigator.of(context).pop();
-    }
-  }
-
-  Future<void> _handleMoreAction(String action) async {
-    final NotebookController controller = context.read<NotebookController>();
-    final NoteItem? note = controller.getNoteById(widget.noteId);
-    if (note == null) {
-      return;
-    }
-
-    switch (action) {
-      case 'pin':
-        await controller.togglePin(note);
-        break;
-      case 'archive':
-        if (note.isArchived) {
-          await controller.unarchiveNote(note);
-        } else {
-          await controller.archiveNote(note);
-        }
-        break;
-      case 'history':
-        await _showVersionHistory();
-        break;
-      case 'export_txt':
-        await _saveNow();
-        await controller.exportNoteAsTxt(note);
-        break;
-      case 'export_pdf':
-        await _saveNow();
-        await controller.exportNoteAsPdf(note);
-        break;
-      case 'delete_forever':
-        await controller.permanentlyDeleteNote(note.id);
-        if (mounted) {
-          Navigator.of(context).pop();
-        }
-        break;
-      default:
-        break;
-    }
-
-    if (mounted) {
-      setState(() {});
-    }
-  }
-
-  Future<void> _showVersionHistory() async {
-    final NotebookController controller = context.read<NotebookController>();
-    final List<NoteItem> versions = controller.getVersionHistory(widget.noteId);
-    if (versions.isEmpty || !mounted) {
-      return;
-    }
-
-    await showDialog<void>(
-      context: context,
-      builder: (BuildContext dialogContext) {
-        return AlertDialog(
-          title: const Text('Version History'),
-          content: SizedBox(
-            width: 620,
-            child: ListView.builder(
-              shrinkWrap: true,
-              itemCount: versions.length,
-              itemBuilder: (BuildContext context, int index) {
-                final NoteItem version = versions[index];
-                return ListTile(
-                  title: Text(
-                    DateFormat('d MMM y HH:mm:ss')
-                        .format(version.updatedAt.toLocal()),
-                  ),
-                  subtitle: Text(
-                    version.body,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  trailing: TextButton(
-                    onPressed: () async {
-                      await controller.restoreVersion(
-                        noteId: widget.noteId,
-                        version: version,
-                      );
-                      if (dialogContext.mounted) {
-                        Navigator.of(dialogContext).pop();
-                      }
-                      final NoteItem? refreshed =
-                          controller.getNoteById(widget.noteId);
-                      if (refreshed != null) {
-                        _titleController.text = refreshed.title;
-                        _bodyController.text = refreshed.body;
-                      }
-                    },
-                    child: const Text('Restore'),
-                  ),
-                );
-              },
-            ),
-          ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('Close'),
-            ),
-          ],
-        );
-      },
-    );
   }
 
   // ---------------------------------------------------------------------------
-  // UI
+  // Build
   // ---------------------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
     final NotebookController controller = context.watch<NotebookController>();
+    final ThemeController themeController = context.watch<ThemeController>();
     final NoteItem? note = controller.getNoteById(widget.noteId);
+    final ThemeData theme = Theme.of(context);
 
-    if (!_initialized || note == null) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    if (note == null || !_initialized) {
+      return Scaffold(
+        appBar: AppBar(),
+        body: const EmptyState(
+          icon: Icons.note_alt_outlined,
+          title: 'Note not found',
+          message: 'It may have been deleted on another device.',
+        ),
+      );
     }
+    _adoptRemote(note);
 
-    final String updated =
-        DateFormat('EEE, d MMM y HH:mm').format(note.updatedAt.toLocal());
+    final Color background =
+        NoteColors.backgroundFor(note.colorId, theme.brightness) ??
+            theme.colorScheme.surface;
+    final double scale = themeController.editorTextSize.scale;
+    final bool readOnly = note.isDeleted;
 
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
-        final bool wide = constraints.maxWidth > 820;
-        // Split view is only offered on wide layouts.
-        final _ViewMode effectiveMode =
-            (!wide && _viewMode == _ViewMode.split) ? _ViewMode.edit : _viewMode;
+        final bool wide = constraints.maxWidth >= Breakpoints.split;
+        final bool desktop = constraints.maxWidth >= Breakpoints.sidebar;
+        _Mode mode = _mode;
+        if (readOnly) {
+          mode = _Mode.read;
+        } else if (!wide && mode == _Mode.split) {
+          mode = _Mode.edit;
+        }
+        final bool editing = mode != _Mode.read;
 
-        return Scaffold(
-          appBar: AppBar(
-            title: const Text('Edit Note'),
-            actions: <Widget>[
-              if (controller.aiAvailable)
-                PopupMenuButton<String>(
-                  tooltip: 'AI assist',
-                  icon: const Icon(Icons.auto_awesome_outlined),
-                  onSelected: _runAi,
-                  itemBuilder: (BuildContext context) =>
-                      <PopupMenuEntry<String>>[
-                    const PopupMenuItem<String>(
-                      value: 'summarize',
-                      child: Text('Summarize into note'),
-                    ),
-                    const PopupMenuItem<String>(
-                      value: 'cleanup',
-                      child: Text('Clean up writing'),
-                    ),
-                    const PopupMenuItem<String>(
-                      value: 'tags',
-                      child: Text('Suggest tags'),
-                    ),
-                  ],
-                ),
-              IconButton(
-                tooltip: _isListening ? 'Stop dictation' : 'Speech to text',
-                onPressed: controller.speechAvailable ? _toggleSpeech : null,
-                icon: Icon(_isListening ? Icons.mic_off : Icons.mic),
-              ),
-              IconButton(
-                tooltip: 'Insert image',
-                onPressed: _addImage,
-                icon: const Icon(Icons.image_outlined),
-              ),
-              IconButton(
-                tooltip: 'Set reminder',
-                onPressed: _setReminder,
-                icon: const Icon(Icons.alarm),
-              ),
-              IconButton(
-                tooltip: 'Share note',
-                onPressed: _shareNote,
-                icon: const Icon(Icons.share),
-              ),
-              PopupMenuButton<String>(
-                tooltip: 'More actions',
-                onSelected: _handleMoreAction,
-                itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
-                  PopupMenuItem<String>(
-                    value: 'pin',
-                    child: Text(note.isPinned ? 'Unpin note' : 'Pin note'),
-                  ),
-                  PopupMenuItem<String>(
-                    value: 'archive',
-                    child: Text(
-                      note.isArchived ? 'Unarchive note' : 'Archive note',
-                    ),
-                  ),
-                  const PopupMenuItem<String>(
-                    value: 'history',
-                    child: Text('Version history'),
-                  ),
-                  const PopupMenuItem<String>(
-                    value: 'export_txt',
-                    child: Text('Export as TXT'),
-                  ),
-                  const PopupMenuItem<String>(
-                    value: 'export_pdf',
-                    child: Text('Export as PDF'),
-                  ),
-                  if (note.isDeleted)
-                    const PopupMenuItem<String>(
-                      value: 'delete_forever',
-                      child: Text('Delete forever'),
-                    ),
-                ],
-              ),
-              IconButton(
-                tooltip: 'Move to trash',
-                onPressed: _moveToTrash,
-                icon: const Icon(Icons.delete_outline),
-              ),
-            ],
-          ),
-          body: SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
+        final Widget toolbar = _Toolbar(
+          undo: _undo,
+          onHeading1: () => _linePrefix('# '),
+          onHeading2: () => _linePrefix('## '),
+          onBold: () => _wrap('**', '**'),
+          onItalic: () => _wrap('*', '*'),
+          onStrike: () => _wrap('~~', '~~'),
+          onBullet: () => _linePrefix('- '),
+          onNumbered: () => _linePrefix('1. '),
+          onChecklist: () => _linePrefix('- [ ] '),
+          onQuote: () => _linePrefix('> '),
+          onCode: () => _wrap('`', '`', placeholder: 'code'),
+          onLink: _insertLink,
+          onDivider: () => _insert('\n\n---\n\n'),
+          onImage: _addImage,
+          onDictate: controller.speechSupported ? _toggleDictation : null,
+          listening: _listening,
+        );
+
+        return CallbackShortcuts(
+          bindings: <ShortcutActivator, VoidCallback>{
+            if (editing) ...<ShortcutActivator, VoidCallback>{
+              const SingleActivator(LogicalKeyboardKey.keyB, control: true): () => _wrap('**', '**'),
+              const SingleActivator(LogicalKeyboardKey.keyI, control: true): () => _wrap('*', '*'),
+              const SingleActivator(LogicalKeyboardKey.keyK, control: true): _insertLink,
+            },
+            const SingleActivator(LogicalKeyboardKey.keyS, control: true): () {
+              _dirty = true;
+              _saveNow();
+              _snack('Saved.');
+            },
+            const SingleActivator(LogicalKeyboardKey.keyE, control: true): () =>
+                _setMode(_mode == _Mode.read ? _Mode.edit : _Mode.read),
+            const SingleActivator(LogicalKeyboardKey.escape): () => Navigator.of(context).maybePop(),
+          },
+          child: Scaffold(
+            backgroundColor: background,
+            appBar: AppBar(
+              backgroundColor: background,
+              bottom: _uploading
+                  ? const PreferredSize(
+                      preferredSize: Size.fromHeight(3),
+                      child: LinearProgressIndicator(minHeight: 3),
+                    )
+                  : null,
+              actions: readOnly
+                  ? _trashActions(note)
+                  : _actions(note, controller, wide: wide, desktop: desktop, mode: mode),
+            ),
+            floatingActionButton: !editing && !readOnly
+                ? FloatingActionButton(
+                    tooltip: 'Edit (Ctrl+E)',
+                    onPressed: () => _setMode(_Mode.edit),
+                    child: const Icon(Icons.edit_outlined),
+                  )
+                : null,
+            body: SafeArea(
+              top: false,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
-                  TextField(
-                    controller: _titleController,
-                    style: Theme.of(context).textTheme.titleLarge,
-                    decoration: const InputDecoration(
-                      hintText: 'Title',
-                      border: InputBorder.none,
-                    ),
-                  ),
-                  Row(
-                    children: <Widget>[
-                      Expanded(
-                        child: Text(
-                          'Updated $updated',
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ),
-                      if (_isListening)
-                        const Padding(
-                          padding: EdgeInsets.only(right: 6),
-                          child: Chip(
-                            avatar: Icon(Icons.mic, size: 16),
-                            label: Text('Listening'),
-                          ),
-                        ),
-                      if (note.reminderAt != null)
-                        Chip(
-                          avatar: const Icon(Icons.alarm, size: 16),
-                          label: Text(
-                            DateFormat('d MMM HH:mm')
-                                .format(note.reminderAt!.toLocal()),
-                          ),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  _EditorToolbar(
-                    viewMode: effectiveMode,
-                    showSplit: wide,
-                    onViewModeChanged: (_ViewMode mode) =>
-                        setState(() => _viewMode = mode),
-                    onBold: () => _wrapSelection('**', '**'),
-                    onItalic: () => _wrapSelection('*', '*'),
-                    onStrike: () => _wrapSelection('~~', '~~'),
-                    onH1: () => _prefixLine('# '),
-                    onH2: () => _prefixLine('## '),
-                    onBullet: () => _prefixLine('- '),
-                    onChecklist: () => _prefixLine('- [ ] '),
-                    onQuote: () => _prefixLine('> '),
-                    onCode: () => _wrapSelection('`', '`'),
-                    onLink: () => _insertAtCursor('[title](https://)'),
-                  ),
-                  const SizedBox(height: 8),
-                  Expanded(
-                    child: _buildEditorBody(effectiveMode),
-                  ),
-                  if (note.imagePaths.isNotEmpty) ...<Widget>[
-                    const SizedBox(height: 10),
-                    SizedBox(
-                      height: 78,
-                      child: ListView.separated(
-                        scrollDirection: Axis.horizontal,
-                        itemCount: note.imagePaths.length,
-                        separatorBuilder: (_, __) => const SizedBox(width: 8),
-                        itemBuilder: (BuildContext context, int index) {
-                          final String path = note.imagePaths[index];
-                          return _AttachmentThumb(
-                            path: path,
-                            onTap: () => _viewImage(path),
-                            onRemove: () => _removeImage(note, path),
-                          );
-                        },
-                      ),
-                    ),
-                  ],
+                  if (readOnly) _TrashNotice(note: note, controller: controller),
+                  if (editing && desktop) toolbar,
+                  Expanded(child: _content(note, controller, mode, scale, readOnly)),
+                  if (editing && !desktop) toolbar,
                 ],
               ),
             ),
@@ -899,83 +813,479 @@ class _NoteEditorScreenState extends State<NoteEditorScreen>
     );
   }
 
-  Widget _buildEditorBody(_ViewMode mode) {
+  List<Widget> _trashActions(NoteItem note) {
+    return <Widget>[
+      TextButton.icon(
+        onPressed: () async {
+          await _controller.restoreFromTrash(note);
+          _snack('Note restored.');
+        },
+        icon: const Icon(Icons.restore_from_trash_outlined),
+        label: const Text('Restore'),
+      ),
+      IconButton(
+        tooltip: 'Delete forever',
+        onPressed: () async {
+          if (await confirmAction(
+            context,
+            title: 'Delete forever?',
+            message: 'This note and its images will be permanently deleted.',
+            confirmLabel: 'Delete',
+            destructive: true,
+          )) {
+            await _controller.permanentlyDeleteNote(note.id);
+            if (mounted) {
+              Navigator.of(context).pop();
+            }
+          }
+        },
+        icon: const Icon(Icons.delete_forever_outlined),
+      ),
+      const SizedBox(width: 4),
+    ];
+  }
+
+  List<Widget> _actions(
+    NoteItem note,
+    NotebookController controller, {
+    required bool wide,
+    required bool desktop,
+    required _Mode mode,
+  }) {
+    return <Widget>[
+      if (wide)
+        Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: SegmentedButton<_Mode>(
+            showSelectedIcon: false,
+            style: const ButtonStyle(visualDensity: VisualDensity.compact),
+            segments: const <ButtonSegment<_Mode>>[
+              ButtonSegment<_Mode>(
+                value: _Mode.edit,
+                icon: Icon(Icons.edit_outlined, size: 18),
+                tooltip: 'Edit',
+              ),
+              ButtonSegment<_Mode>(
+                value: _Mode.split,
+                icon: Icon(Icons.vertical_split_outlined, size: 18),
+                tooltip: 'Side by side',
+              ),
+              ButtonSegment<_Mode>(
+                value: _Mode.read,
+                icon: Icon(Icons.chrome_reader_mode_outlined, size: 18),
+                tooltip: 'Reading view',
+              ),
+            ],
+            selected: <_Mode>{mode},
+            onSelectionChanged: (Set<_Mode> s) => _setMode(s.first),
+          ),
+        )
+      else if (mode != _Mode.read)
+        IconButton(
+          tooltip: 'Reading view',
+          onPressed: () => _setMode(_Mode.read),
+          icon: const Icon(Icons.chrome_reader_mode_outlined),
+        ),
+      IconButton(
+        tooltip: note.isPinned ? 'Unpin' : 'Pin',
+        onPressed: () async {
+          await _saveNow();
+          await controller.togglePin(_note ?? note);
+        },
+        icon: Icon(note.isPinned ? Icons.push_pin : Icons.push_pin_outlined),
+      ),
+      IconButton(
+        tooltip: 'Reminder',
+        onPressed: () => _pickReminder(note),
+        icon: Icon(note.reminderAt == null ? Icons.alarm_add_outlined : Icons.alarm_on),
+      ),
+      IconButton(
+        tooltip: 'Colour',
+        onPressed: () => _pickColor(note),
+        icon: const Icon(Icons.palette_outlined),
+      ),
+      if (desktop)
+        IconButton(
+          tooltip: 'Share',
+          onPressed: _share,
+          icon: const Icon(Icons.ios_share),
+        ),
+      PopupMenuButton<String>(
+        tooltip: 'More',
+        onSelected: (String value) => _onMenu(value, note),
+        itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+          _item('image', Icons.add_photo_alternate_outlined, 'Add image'),
+          if (controller.speechSupported)
+            _item('dictate', _listening ? Icons.mic_off_outlined : Icons.mic_none,
+                _listening ? 'Stop dictation' : 'Dictate'),
+          _item('tags', Icons.tag, 'Tags'),
+          _item('move', Icons.drive_file_move_outline, 'Move to folder'),
+          if (!desktop) _item('share', Icons.ios_share, 'Share'),
+          if (controller.aiAvailable) ...<PopupMenuEntry<String>>[
+            const PopupMenuDivider(),
+            _item('ai_summary', Icons.auto_awesome_outlined, 'Summarise'),
+            _item('ai_cleanup', Icons.spellcheck, 'Clean up writing'),
+            _item('ai_tags', Icons.sell_outlined, 'Suggest tags'),
+          ],
+          const PopupMenuDivider(),
+          _item('template', Icons.bookmark_add_outlined, 'Save as template'),
+          _item('history', Icons.history, 'Version history'),
+          _item('txt', Icons.description_outlined, 'Export as text'),
+          _item('pdf', Icons.picture_as_pdf_outlined, 'Export as PDF'),
+          const PopupMenuDivider(),
+          _item('archive', note.isArchived ? Icons.unarchive_outlined : Icons.archive_outlined,
+              note.isArchived ? 'Unarchive' : 'Archive'),
+          _item('trash', Icons.delete_outline, 'Move to trash'),
+        ],
+      ),
+      const SizedBox(width: 4),
+    ];
+  }
+
+  PopupMenuItem<String> _item(String value, IconData icon, String label) {
+    return PopupMenuItem<String>(
+      value: value,
+      child: ListTile(leading: Icon(icon), title: Text(label)),
+    );
+  }
+
+  Widget _content(
+    NoteItem note,
+    NotebookController controller,
+    _Mode mode,
+    double scale,
+    bool readOnly,
+  ) {
     switch (mode) {
-      case _ViewMode.edit:
-        return _buildSourceField();
-      case _ViewMode.preview:
-        return _buildPreview();
-      case _ViewMode.split:
+      case _Mode.read:
+        return _ReadingPane(
+          note: note,
+          controller: controller,
+          title: _title.text,
+          body: _body.text,
+          scale: scale,
+          onToggleTask: readOnly ? null : _toggleTask,
+          onEditTitle: readOnly ? null : () => _setMode(_Mode.edit),
+          meta: _MetaBar(
+            note: note,
+            controller: controller,
+            body: _body.text,
+            onFolder: readOnly ? null : () => _moveFolder(note),
+            onReminder: readOnly ? null : () => _pickReminder(note),
+            onClearReminder: readOnly ? null : () => _clearReminder(note),
+            onTags: readOnly ? null : () => _editTags(note),
+          ),
+        );
+      case _Mode.edit:
+        return _editPane(note, controller, scale);
+      case _Mode.split:
         return Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            Expanded(child: _buildSourceField()),
-            const SizedBox(width: 10),
-            Expanded(child: _buildPreview()),
+            Expanded(child: _editPane(note, controller, scale)),
+            const VerticalDivider(width: 1),
+            Expanded(
+              child: _ReadingPane(
+                note: note,
+                controller: controller,
+                title: _title.text,
+                body: _body.text,
+                scale: scale,
+                onToggleTask: _toggleTask,
+                compact: true,
+              ),
+            ),
           ],
         );
     }
   }
 
-  Widget _buildSourceField() {
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: Theme.of(context).colorScheme.outlineVariant.withValues(
-                alpha: 0.5,
-              ),
-        ),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: TextField(
-        controller: _bodyController,
-        focusNode: _bodyFocusNode,
-        expands: true,
-        minLines: null,
-        maxLines: null,
-        textAlignVertical: TextAlignVertical.top,
-        decoration: const InputDecoration(
-          hintText: 'Write in Markdown...',
-          border: InputBorder.none,
-        ),
-      ),
-    );
-  }
+  Widget _editPane(NoteItem note, NotebookController controller, double scale) {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme scheme = theme.colorScheme;
+    final List<String> images = <String>{
+      ...note.imagePaths,
+      ...MarkdownTools.imageUrls(note.body),
+    }.where((String u) => u.startsWith('http')).toList();
 
-  Widget _buildPreview() {
-    final String data = _bodyController.text.trim();
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        color: Theme.of(context).colorScheme.surfaceContainerLow,
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      child: data.isEmpty
-          ? Center(
-              child: Text(
-                'Nothing to preview yet.',
-                style: Theme.of(context).textTheme.bodySmall,
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 780),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              TextField(
+                controller: _title,
+                focusNode: _titleFocus,
+                textInputAction: TextInputAction.next,
+                textCapitalization: TextCapitalization.sentences,
+                onSubmitted: (_) => _bodyFocus.requestFocus(),
+                style: theme.textTheme.headlineSmall?.copyWith(fontSize: 26 * scale),
+                decoration: const InputDecoration(
+                  hintText: 'Title',
+                  filled: false,
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                  contentPadding: EdgeInsets.symmetric(vertical: 8),
+                ),
               ),
-            )
-          : Markdown(
-              data: data,
-              selectable: true,
-              padding: EdgeInsets.zero,
-            ),
+              _MetaBar(
+                note: note,
+                controller: controller,
+                body: _body.text,
+                onFolder: () => _moveFolder(note),
+                onReminder: () => _pickReminder(note),
+                onClearReminder: () => _clearReminder(note),
+                onTags: () => _editTags(note),
+              ),
+              const SizedBox(height: 4),
+              Expanded(
+                child: TextField(
+                  controller: _body,
+                  focusNode: _bodyFocus,
+                  undoController: _undo,
+                  expands: true,
+                  minLines: null,
+                  maxLines: null,
+                  keyboardType: TextInputType.multiline,
+                  textCapitalization: TextCapitalization.sentences,
+                  textAlignVertical: TextAlignVertical.top,
+                  inputFormatters: <TextInputFormatter>[ListContinuationFormatter()],
+                  style: theme.textTheme.bodyLarge?.copyWith(
+                    fontSize: 16 * scale,
+                    height: 1.6,
+                  ),
+                  decoration: InputDecoration(
+                    hintText: 'Start writing. Markdown works: # heading, - list, - [ ] task',
+                    hintStyle: TextStyle(color: scheme.onSurfaceVariant.withValues(alpha: 0.7)),
+                    filled: false,
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                  ),
+                ),
+              ),
+              if (images.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: SizedBox(
+                    height: 76,
+                    child: ListView.separated(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: images.length,
+                      separatorBuilder: (_, __) => const SizedBox(width: 8),
+                      itemBuilder: (BuildContext context, int index) => _Thumb(
+                        url: images[index],
+                        onOpen: () => showImageViewer(context, images[index]),
+                        onRemove: () => _removeImage(note, images[index]),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
 
-class _AttachmentThumb extends StatelessWidget {
-  const _AttachmentThumb({
-    required this.path,
-    required this.onTap,
-    required this.onRemove,
+// =============================================================================
+// Pieces
+// =============================================================================
+
+class _ReadingPane extends StatelessWidget {
+  const _ReadingPane({
+    required this.note,
+    required this.controller,
+    required this.title,
+    required this.body,
+    required this.scale,
+    this.onToggleTask,
+    this.onEditTitle,
+    this.meta,
+    this.compact = false,
   });
 
-  final String path;
-  final VoidCallback onTap;
+  final NoteItem note;
+  final NotebookController controller;
+  final String title;
+  final String body;
+  final double scale;
+  final ValueChanged<int>? onToggleTask;
+  final VoidCallback? onEditTitle;
+  final Widget? meta;
+
+  /// Split view: body only, no title block.
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme scheme = theme.colorScheme;
+    return Scrollbar(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 120),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 780),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                if (!compact) ...<Widget>[
+                  GestureDetector(
+                    onTap: onEditTitle,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: Text(
+                        title.trim().isEmpty ? 'Untitled' : title.trim(),
+                        style: theme.textTheme.headlineSmall?.copyWith(
+                          fontSize: 26 * scale,
+                          color: title.trim().isEmpty ? scheme.onSurfaceVariant : null,
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (meta != null) meta!,
+                  const SizedBox(height: 12),
+                ] else
+                  const SizedBox(height: 12),
+                if (body.trim().isEmpty)
+                  Text(
+                    'Nothing here yet. Tap the pencil to start writing.',
+                    style: theme.textTheme.bodyLarge?.copyWith(color: scheme.onSurfaceVariant),
+                  )
+                else
+                  NoteMarkdown(data: body, scale: scale, onToggleTask: onToggleTask),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Folder, reminder, tags, edited time and word count, as one quiet row.
+class _MetaBar extends StatelessWidget {
+  const _MetaBar({
+    required this.note,
+    required this.controller,
+    required this.body,
+    this.onFolder,
+    this.onReminder,
+    this.onClearReminder,
+    this.onTags,
+  });
+
+  final NoteItem note;
+  final NotebookController controller;
+  final String body;
+  final VoidCallback? onFolder;
+  final VoidCallback? onReminder;
+  final VoidCallback? onClearReminder;
+  final VoidCallback? onTags;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme scheme = theme.colorScheme;
+    final int words = MarkdownTools.wordCount(body);
+    final int minutes = MarkdownTools.readingMinutes(words);
+    final String folder = controller.folderById(note.folderId)?.name ?? 'Inbox';
+    final bool overdue = note.reminderAt != null && note.reminderAt!.isBefore(DateTime.now());
+
+    final ChipThemeData chipTheme = ChipTheme.of(context).copyWith(
+      backgroundColor: scheme.onSurface.withValues(alpha: 0.05),
+      side: BorderSide.none,
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      labelStyle: theme.textTheme.labelMedium,
+    );
+
+    return ChipTheme(
+      data: chipTheme,
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: <Widget>[
+          ActionChip(
+            avatar: const Icon(Icons.folder_outlined, size: 16),
+            label: Text(folder),
+            onPressed: onFolder,
+          ),
+          if (note.reminderAt != null)
+            InputChip(
+              avatar: Icon(overdue ? Icons.alarm_off : Icons.alarm, size: 16,
+                  color: overdue ? scheme.error : null),
+              label: Text(reminderLabel(note.reminderAt!)),
+              onPressed: onReminder,
+              onDeleted: onClearReminder,
+              deleteButtonTooltipMessage: 'Remove reminder',
+            ),
+          for (final String tag in note.tags)
+            ActionChip(label: Text('#$tag'), onPressed: onTags),
+          if (onTags != null && note.tags.isEmpty)
+            ActionChip(
+              avatar: const Icon(Icons.add, size: 16),
+              label: const Text('Tag'),
+              onPressed: onTags,
+            ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            child: Text(
+              'Edited ${relativeTime(note.updatedAt).toLowerCase()}'
+              '${words == 0 ? '' : '  |  $words word${words == 1 ? '' : 's'}, $minutes min read'}',
+              style: theme.textTheme.labelMedium?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TrashNotice extends StatelessWidget {
+  const _TrashNotice({required this.note, required this.controller});
+
+  final NoteItem note;
+  final NotebookController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: scheme.errorContainer.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        children: <Widget>[
+          Icon(Icons.delete_outline, color: scheme.onErrorContainer),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              'This note is in the trash. Restore it to make changes.',
+              style: TextStyle(color: scheme.onErrorContainer),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Thumb extends StatelessWidget {
+  const _Thumb({required this.url, required this.onOpen, required this.onRemove});
+
+  final String url;
+  final VoidCallback onOpen;
   final VoidCallback onRemove;
 
   @override
@@ -984,63 +1294,36 @@ class _AttachmentThumb extends StatelessWidget {
     return Stack(
       children: <Widget>[
         ClipRRect(
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(12),
           child: GestureDetector(
-            onTap: onTap,
-            child: SizedBox(
-              width: 78,
-              height: 78,
-              child: path.startsWith('http')
-                  ? Image.network(
-                      path,
-                      fit: BoxFit.cover,
-                      loadingBuilder: (BuildContext context, Widget child,
-                          ImageChunkEvent? progress) {
-                        if (progress == null) {
-                          return child;
-                        }
-                        return Container(
-                          color: scheme.surfaceContainerHighest,
-                          alignment: Alignment.center,
-                          child: const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child:
-                                CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        );
-                      },
-                      errorBuilder: (BuildContext context, Object error,
-                          StackTrace? stack) {
-                        return Container(
-                          color: scheme.surfaceContainerHighest,
-                          alignment: Alignment.center,
-                          child: Icon(Icons.broken_image_outlined,
-                              color: scheme.onSurfaceVariant),
-                        );
-                      },
-                    )
-                  : Container(
-                      color: scheme.surfaceContainerHighest,
-                      alignment: Alignment.center,
-                      child: Icon(Icons.image_outlined,
-                          color: scheme.onSurfaceVariant),
-                    ),
+            onTap: onOpen,
+            child: Image.network(
+              url,
+              width: 76,
+              height: 76,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => Container(
+                width: 76,
+                height: 76,
+                color: scheme.surfaceContainerHigh,
+                child: Icon(Icons.broken_image_outlined, color: scheme.onSurfaceVariant),
+              ),
             ),
           ),
         ),
         Positioned(
-          top: 2,
-          right: 2,
-          child: GestureDetector(
-            onTap: onRemove,
-            child: Container(
-              decoration: const BoxDecoration(
-                color: Colors.black54,
-                shape: BoxShape.circle,
+          top: 3,
+          right: 3,
+          child: Material(
+            color: Colors.black54,
+            shape: const CircleBorder(),
+            child: InkWell(
+              customBorder: const CircleBorder(),
+              onTap: onRemove,
+              child: const Padding(
+                padding: EdgeInsets.all(3),
+                child: Icon(Icons.close, size: 14, color: Colors.white),
               ),
-              padding: const EdgeInsets.all(2),
-              child: const Icon(Icons.close, size: 14, color: Colors.white),
             ),
           ),
         ),
@@ -1049,104 +1332,104 @@ class _AttachmentThumb extends StatelessWidget {
   }
 }
 
-class _EditorToolbar extends StatelessWidget {
-  const _EditorToolbar({
-    required this.viewMode,
-    required this.showSplit,
-    required this.onViewModeChanged,
+class _Toolbar extends StatelessWidget {
+  const _Toolbar({
+    required this.undo,
+    required this.onHeading1,
+    required this.onHeading2,
     required this.onBold,
     required this.onItalic,
     required this.onStrike,
-    required this.onH1,
-    required this.onH2,
     required this.onBullet,
+    required this.onNumbered,
     required this.onChecklist,
     required this.onQuote,
     required this.onCode,
     required this.onLink,
+    required this.onDivider,
+    required this.onImage,
+    required this.onDictate,
+    required this.listening,
   });
 
-  final _ViewMode viewMode;
-  final bool showSplit;
-  final ValueChanged<_ViewMode> onViewModeChanged;
+  final UndoHistoryController undo;
+  final VoidCallback onHeading1;
+  final VoidCallback onHeading2;
   final VoidCallback onBold;
   final VoidCallback onItalic;
   final VoidCallback onStrike;
-  final VoidCallback onH1;
-  final VoidCallback onH2;
   final VoidCallback onBullet;
+  final VoidCallback onNumbered;
   final VoidCallback onChecklist;
   final VoidCallback onQuote;
   final VoidCallback onCode;
   final VoidCallback onLink;
+  final VoidCallback onDivider;
+  final VoidCallback onImage;
+  final VoidCallback? onDictate;
+  final bool listening;
 
   @override
   Widget build(BuildContext context) {
-    final bool formattingEnabled = viewMode != _ViewMode.preview;
+    final ColorScheme scheme = Theme.of(context).colorScheme;
 
-    return Row(
-      children: <Widget>[
-        Expanded(
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: <Widget>[
-                _btn(Icons.format_bold, 'Bold', formattingEnabled ? onBold : null),
-                _btn(Icons.format_italic, 'Italic',
-                    formattingEnabled ? onItalic : null),
-                _btn(Icons.strikethrough_s, 'Strikethrough',
-                    formattingEnabled ? onStrike : null),
-                _btn(Icons.title, 'Heading 1', formattingEnabled ? onH1 : null),
-                _btn(Icons.text_fields, 'Heading 2',
-                    formattingEnabled ? onH2 : null),
-                _btn(Icons.format_list_bulleted, 'Bullet list',
-                    formattingEnabled ? onBullet : null),
-                _btn(Icons.checklist, 'Checklist',
-                    formattingEnabled ? onChecklist : null),
-                _btn(Icons.format_quote, 'Quote',
-                    formattingEnabled ? onQuote : null),
-                _btn(Icons.code, 'Inline code', formattingEnabled ? onCode : null),
-                _btn(Icons.link, 'Link', formattingEnabled ? onLink : null),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(width: 8),
-        SegmentedButton<_ViewMode>(
-          showSelectedIcon: false,
-          style: const ButtonStyle(
-            visualDensity: VisualDensity.compact,
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-          segments: <ButtonSegment<_ViewMode>>[
-            const ButtonSegment<_ViewMode>(
-              value: _ViewMode.edit,
-              icon: Icon(Icons.edit_outlined, size: 18),
-            ),
-            if (showSplit)
-              const ButtonSegment<_ViewMode>(
-                value: _ViewMode.split,
-                icon: Icon(Icons.vertical_split_outlined, size: 18),
+    Widget button(IconData icon, String tip, VoidCallback? onTap, {bool active = false}) {
+      return IconButton(
+        tooltip: tip,
+        onPressed: onTap,
+        isSelected: active,
+        visualDensity: VisualDensity.compact,
+        color: active ? scheme.primary : null,
+        icon: Icon(icon, size: 21),
+      );
+    }
+
+    Widget gap() => Container(
+          width: 1,
+          height: 22,
+          margin: const EdgeInsets.symmetric(horizontal: 6),
+          color: scheme.outlineVariant,
+        );
+
+    return Material(
+      color: scheme.surfaceContainer,
+      child: SizedBox(
+        height: 50,
+        child: ListView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          children: <Widget>[
+            ValueListenableBuilder<UndoHistoryValue>(
+              valueListenable: undo,
+              builder: (BuildContext context, UndoHistoryValue value, _) => Row(
+                children: <Widget>[
+                  button(Icons.undo, 'Undo', value.canUndo ? undo.undo : null),
+                  button(Icons.redo, 'Redo', value.canRedo ? undo.redo : null),
+                ],
               ),
-            const ButtonSegment<_ViewMode>(
-              value: _ViewMode.preview,
-              icon: Icon(Icons.visibility_outlined, size: 18),
             ),
+            gap(),
+            button(Icons.title, 'Heading', onHeading1),
+            button(Icons.text_fields, 'Subheading', onHeading2),
+            button(Icons.format_bold, 'Bold (Ctrl+B)', onBold),
+            button(Icons.format_italic, 'Italic (Ctrl+I)', onItalic),
+            button(Icons.strikethrough_s, 'Strikethrough', onStrike),
+            gap(),
+            button(Icons.checklist, 'Checklist', onChecklist),
+            button(Icons.format_list_bulleted, 'Bulleted list', onBullet),
+            button(Icons.format_list_numbered, 'Numbered list', onNumbered),
+            button(Icons.format_quote_outlined, 'Quote', onQuote),
+            button(Icons.code, 'Code', onCode),
+            button(Icons.link, 'Link (Ctrl+K)', onLink),
+            button(Icons.horizontal_rule, 'Divider', onDivider),
+            gap(),
+            button(Icons.add_photo_alternate_outlined, 'Add image', onImage),
+            if (onDictate != null)
+              button(listening ? Icons.mic : Icons.mic_none,
+                  listening ? 'Stop dictation' : 'Dictate', onDictate, active: listening),
           ],
-          selected: <_ViewMode>{viewMode},
-          onSelectionChanged: (Set<_ViewMode> selection) =>
-              onViewModeChanged(selection.first),
         ),
-      ],
-    );
-  }
-
-  Widget _btn(IconData icon, String tooltip, VoidCallback? onPressed) {
-    return IconButton(
-      icon: Icon(icon, size: 20),
-      tooltip: tooltip,
-      onPressed: onPressed,
-      visualDensity: VisualDensity.compact,
+      ),
     );
   }
 }

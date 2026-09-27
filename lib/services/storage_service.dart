@@ -38,6 +38,35 @@ class StorageService {
     return client.storage.from(bucketId).getPublicUrl(path);
   }
 
+  /// Deletes the stored objects behind [urls]. URLs that don't point into this
+  /// bucket are ignored. Failures are swallowed: an orphaned image costs a few
+  /// kilobytes, while a thrown error here would block the user's action.
+  Future<void> deleteImagesByUrl(Iterable<String> urls) async {
+    final List<String> paths = urls
+        .map(storagePathFromUrl)
+        .whereType<String>()
+        .toList(growable: false);
+    if (paths.isEmpty) {
+      return;
+    }
+    try {
+      await Supabase.instance.client.storage.from(bucketId).remove(paths);
+    } catch (_) {
+      // Best effort.
+    }
+  }
+
+  /// `.../storage/v1/object/public/note-images/<path>` -> `<path>`.
+  static String? storagePathFromUrl(String url) {
+    const String marker = '/storage/v1/object/public/$bucketId/';
+    final int index = url.indexOf(marker);
+    if (index == -1) {
+      return null;
+    }
+    final String path = url.substring(index + marker.length).split('?').first;
+    return path.isEmpty ? null : Uri.decodeComponent(path);
+  }
+
   String _normalizeExtension(String raw) {
     final String cleaned = raw.replaceAll('.', '').toLowerCase().trim();
     const Set<String> allowed = <String>{

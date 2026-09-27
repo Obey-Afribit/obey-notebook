@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # create the 'latest' release with the APK
+  contents: write # publish the 'latest' release (APK + Windows zip)
   pages: write # deploy the web build to GitHub Pages
   id-token: write
 
@@ -14,7 +14,28 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
+env:
+  DART_DEFINES: >-
+    --dart-define=SUPABASE_URL=${{ secrets.SUPABASE_URL }}
+    --dart-define=SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # Quality gate: nothing is released or deployed unless this passes.
+  # ---------------------------------------------------------------------------
+  checks:
+    name: Analyze and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze --no-fatal-infos
+      - run: flutter test
+
   android:
     name: Build Android APK
     runs-on: ubuntu-latest
@@ -27,23 +48,58 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
       - run: flutter pub get
       - name: Build release APK
-        run: >
-          flutter build apk --release
-          --dart-define=SUPABASE_URL=${{ secrets.SUPABASE_URL }}
-          --dart-define=SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+        run: flutter build apk --release ${{ env.DART_DEFINES }}
+      - uses: actions/upload-artifact@v4
         with:
-          name: universal-notebook-apk
+          name: android
           path: build/app/outputs/flutter-apk/app-release.apk
-      - name: Publish APK to the 'latest' release
+
+  windows:
+    name: Build Windows app
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Build release exe
+        run: flutter build windows --release ${{ env.DART_DEFINES }}
+      - name: Zip the app folder
+        shell: pwsh
+        run: Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath UniversalNotebook-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: UniversalNotebook-windows-x64.zip
+
+  release:
+    name: Publish downloads
+    needs: [checks, android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish to the 'latest' release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: Latest build
-          files: build/app/outputs/flutter-apk/app-release.apk
+          body: |
+            Built automatically from ${{ github.sha }}.
+
+            - **Android:** download `app-release.apk` on your phone and open it to install.
+            - **Windows:** download `UniversalNotebook-windows-x64.zip`, unzip it anywhere, run `universal_notebook.exe`.
+            - **Web:** https://obey-afribit.github.io/obey-notebook/
+          files: |
+            dist/app-release.apk
+            dist/UniversalNotebook-windows-x64.zip
 
   build-web:
     name: Build Web
@@ -58,21 +114,20 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
       - run: flutter pub get
       - name: Build web
         run: >
           flutter build web --release
           --base-href "${{ steps.pages.outputs.base_path }}/"
-          --dart-define=SUPABASE_URL=${{ secrets.SUPABASE_URL }}
-          --dart-define=SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+          ${{ env.DART_DEFINES }}
+      - uses: actions/upload-pages-artifact@v3
         with:
           path: build/web
 
   deploy-web:
     name: Deploy Web to Pages
-    needs: build-web
+    needs: [checks, build-web]
     runs-on: ubuntu-latest
     environment:
       name: github-pages

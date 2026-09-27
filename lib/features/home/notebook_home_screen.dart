@@ -1,12 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
-import '../../core/theme/theme_controller.dart';
+import '../../core/markdown_tools.dart';
+import '../../core/models/note_item.dart';
 import '../../state/notebook_controller.dart';
-import '../notes/note_editor_screen.dart';
-import '../notes/notes_dashboard.dart';
+import '../notes/note_card.dart';
+import '../notes/notes_view.dart';
 import '../settings/settings_screen.dart';
+import '../shared/ui.dart';
 import '../templates/templates_screen.dart';
+import 'notebook_sidebar.dart';
 
 class NotebookHomeScreen extends StatefulWidget {
   const NotebookHomeScreen({super.key});
@@ -16,234 +20,320 @@ class NotebookHomeScreen extends StatefulWidget {
 }
 
 class _NotebookHomeScreenState extends State<NotebookHomeScreen> {
-  int _tabIndex = 0;
+  HomeSection _section = HomeSection.notes;
+  final FocusNode _searchFocus = FocusNode();
+  late final NotebookController _controller;
+  bool _alertOpen = false;
+  bool _recoveryOpen = false;
 
-  static const List<_NavItem> _navItems = <_NavItem>[
-    _NavItem(Icons.notes_outlined, Icons.notes, 'Notes'),
-    _NavItem(Icons.dashboard_customize_outlined, Icons.dashboard_customize,
-        'Templates'),
-    _NavItem(Icons.settings_outlined, Icons.settings, 'Settings'),
-  ];
+  @override
+  void initState() {
+    super.initState();
+    _controller = context.read<NotebookController>();
+    _controller.reminderAlerts.addListener(_onReminderAlerts);
+    _controller.addListener(_onControllerChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _onReminderAlerts();
+      _onControllerChanged();
+    });
+  }
 
-  Future<void> _openQuickCaptureDialog(BuildContext context) async {
-    final TextEditingController quickController = TextEditingController();
+  @override
+  void dispose() {
+    _controller.reminderAlerts.removeListener(_onReminderAlerts);
+    _controller.removeListener(_onControllerChanged);
+    _searchFocus.dispose();
+    super.dispose();
+  }
 
-    await showDialog<void>(
+  // ---------------------------------------------------------------------------
+  // Actions
+  // ---------------------------------------------------------------------------
+
+  Future<void> _newNote() async {
+    if (_controller.view == NotebookView.trash ||
+        _controller.view == NotebookView.archive) {
+      _controller.openView(NotebookView.all);
+    }
+    setState(() => _section = HomeSection.notes);
+    final NoteItem note = await _controller.createNote();
+    if (mounted) {
+      await openNote(context, note.id, isNew: true);
+    }
+  }
+
+  void _focusSearch() {
+    setState(() => _section = HomeSection.notes);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _searchFocus.requestFocus());
+  }
+
+  void _escape() {
+    if (_controller.selectionMode) {
+      _controller.clearSelection();
+    } else if (_controller.searchQuery.isNotEmpty) {
+      _controller.setSearchQuery('');
+    }
+    FocusManager.instance.primaryFocus?.unfocus();
+  }
+
+  // ---------------------------------------------------------------------------
+  // In-app reminders (Windows and web) and password recovery
+  // ---------------------------------------------------------------------------
+
+  Future<void> _onReminderAlerts() async {
+    if (_alertOpen || !mounted) {
+      return;
+    }
+    final List<NoteItem> alerts = _controller.reminderAlerts.value;
+    if (alerts.isEmpty) {
+      return;
+    }
+    _alertOpen = true;
+    final NoteItem note = alerts.first;
+    final String? choice = await showDialog<String>(
       context: context,
+      barrierDismissible: false,
       builder: (BuildContext dialogContext) {
+        final String preview = MarkdownTools.previewText(note.body);
         return AlertDialog(
-          title: const Text('Quick capture'),
-          content: SizedBox(
-            width: 460,
-            child: TextField(
-              controller: quickController,
-              minLines: 4,
-              maxLines: 8,
-              autofocus: true,
-              decoration: const InputDecoration(
-                hintText: 'Type a quick thought, todo, or idea...',
-              ),
-            ),
-          ),
+          icon: const Icon(Icons.alarm),
+          title: Text(note.displayTitle.isEmpty ? 'Reminder' : note.displayTitle),
+          content: preview.isEmpty
+              ? null
+              : Text(preview, maxLines: 4, overflow: TextOverflow.ellipsis),
           actions: <Widget>[
             TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('Cancel'),
+              onPressed: () => Navigator.of(dialogContext).pop('snooze'),
+              child: const Text('Snooze 10 min'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop('dismiss'),
+              child: const Text('Dismiss'),
             ),
             FilledButton(
-              onPressed: () async {
-                final String text = quickController.text.trim();
-                if (text.isEmpty) {
-                  return;
-                }
-                final note = await context
-                    .read<NotebookController>()
-                    .quickCaptureNote(text);
-                if (dialogContext.mounted) {
-                  Navigator.of(dialogContext).pop();
-                }
-                if (!context.mounted) {
-                  return;
-                }
-                await Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (BuildContext context) =>
-                        NoteEditorScreen(noteId: note.id),
-                  ),
-                );
-              },
-              child: const Text('Capture'),
+              onPressed: () => Navigator.of(dialogContext).pop('open'),
+              child: const Text('Open note'),
             ),
           ],
         );
       },
     );
-
-    quickController.dispose();
-  }
-
-  Future<void> _createAndOpenNote(BuildContext context) async {
-    final NotebookController controller = context.read<NotebookController>();
-    final note =
-        await controller.createBlankNote(folderId: controller.selectedFolderId);
-
-    if (!context.mounted) {
+    _controller.dismissReminderAlert(note);
+    _alertOpen = false;
+    if (!mounted) {
       return;
     }
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (BuildContext context) => NoteEditorScreen(noteId: note.id),
-      ),
-    );
-  }
-
-  void _cycleThemeMode(ThemeController theme) {
-    final ThemeMode next;
-    switch (theme.themeMode) {
-      case ThemeMode.system:
-        next = ThemeMode.light;
-        break;
-      case ThemeMode.light:
-        next = ThemeMode.dark;
-        break;
-      case ThemeMode.dark:
-        next = ThemeMode.system;
-        break;
+    if (choice == 'snooze') {
+      await _controller.setReminder(
+        note,
+        DateTime.now().add(const Duration(minutes: 10)),
+      );
+    } else if (choice == 'open') {
+      await openNote(context, note.id);
     }
-    theme.setThemeMode(next);
+    _onReminderAlerts(); // show the next one, if any
   }
 
-  IconData _themeModeIcon(ThemeMode mode) {
-    switch (mode) {
-      case ThemeMode.system:
-        return Icons.brightness_auto_outlined;
-      case ThemeMode.light:
-        return Icons.light_mode_outlined;
-      case ThemeMode.dark:
-        return Icons.dark_mode_outlined;
+  void _onControllerChanged() {
+    if (!mounted || _recoveryOpen || !_controller.passwordRecoveryPending) {
+      return;
+    }
+    _recoveryOpen = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const _NewPasswordDialog(),
+      );
+      _recoveryOpen = false;
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Layout
+  // ---------------------------------------------------------------------------
+
+  Widget _content(bool compact) {
+    switch (_section) {
+      case HomeSection.notes:
+        return NotesView(searchFocusNode: _searchFocus, compact: compact);
+      case HomeSection.templates:
+        return TemplatesView(compact: compact);
+      case HomeSection.settings:
+        return SettingsView(compact: compact);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final NotebookController controller = context.watch<NotebookController>();
-    final ThemeController themeController = context.watch<ThemeController>();
 
-    final List<Widget> tabs = <Widget>[
-      const NotesDashboard(),
-      const TemplatesScreen(),
-      const SettingsScreen(),
-    ];
-
-    return LayoutBuilder(
-      builder: (BuildContext context, BoxConstraints constraints) {
-        final bool wide = constraints.maxWidth >= 800;
-
-        final List<Widget> appBarActions = <Widget>[
-          IconButton(
-            tooltip: 'Quick capture',
-            onPressed: () => _openQuickCaptureDialog(context),
-            icon: const Icon(Icons.bolt_outlined),
-          ),
-          IconButton(
-            tooltip: 'Theme: ${themeController.themeMode.name}',
-            onPressed: () => _cycleThemeMode(themeController),
-            icon: Icon(_themeModeIcon(themeController.themeMode)),
-          ),
-          IconButton(
-            tooltip: 'Sync now',
-            onPressed: controller.isBusy
-                ? null
-                : () async {
-                    final bool synced = await controller.syncNow();
-                    if (!context.mounted) {
-                      return;
-                    }
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          synced
-                              ? 'Synced successfully.'
-                              : 'Sync pending. You may be offline.',
-                        ),
-                      ),
-                    );
-                  },
-            icon: const Icon(Icons.sync),
-          ),
-          const SizedBox(width: 4),
-        ];
-
-        final Widget? fab = _tabIndex == 0
-            ? FloatingActionButton.extended(
-                onPressed: () => _createAndOpenNote(context),
-                icon: const Icon(Icons.add),
-                label: const Text('New note'),
-              )
-            : null;
-
-        if (wide) {
-          return Scaffold(
-            appBar: AppBar(
-              title: const Text('Universal Notebook'),
-              actions: appBarActions,
-            ),
-            floatingActionButton: fab,
-            body: Row(
-              children: <Widget>[
-                NavigationRail(
-                  selectedIndex: _tabIndex,
-                  onDestinationSelected: (int index) =>
-                      setState(() => _tabIndex = index),
-                  labelType: NavigationRailLabelType.all,
-                  destinations: _navItems
-                      .map(
-                        (_NavItem item) => NavigationRailDestination(
-                          icon: Icon(item.icon),
-                          selectedIcon: Icon(item.selectedIcon),
-                          label: Text(item.label),
-                        ),
-                      )
-                      .toList(growable: false),
-                ),
-                const VerticalDivider(width: 1),
-                Expanded(child: tabs[_tabIndex]),
-              ],
-            ),
-          );
-        }
-
-        return Scaffold(
-          appBar: AppBar(
-            title: const Text('Universal Notebook'),
-            actions: appBarActions,
-          ),
-          body: tabs[_tabIndex],
-          floatingActionButton: fab,
-          bottomNavigationBar: NavigationBar(
-            selectedIndex: _tabIndex,
-            onDestinationSelected: (int index) =>
-                setState(() => _tabIndex = index),
-            destinations: _navItems
-                .map(
-                  (_NavItem item) => NavigationDestination(
-                    icon: Icon(item.icon),
-                    selectedIcon: Icon(item.selectedIcon),
-                    label: item.label,
-                  ),
-                )
-                .toList(growable: false),
-          ),
-        );
+    return CallbackShortcuts(
+      bindings: <ShortcutActivator, VoidCallback>{
+        const SingleActivator(LogicalKeyboardKey.keyN, control: true): _newNote,
+        const SingleActivator(LogicalKeyboardKey.keyN, meta: true): _newNote,
+        const SingleActivator(LogicalKeyboardKey.keyF, control: true): _focusSearch,
+        const SingleActivator(LogicalKeyboardKey.keyK, control: true): _focusSearch,
+        const SingleActivator(LogicalKeyboardKey.keyF, meta: true): _focusSearch,
+        const SingleActivator(LogicalKeyboardKey.escape): _escape,
       },
+      child: Focus(
+        autofocus: true,
+        child: LayoutBuilder(
+          builder: (BuildContext context, BoxConstraints constraints) {
+            final bool wide = constraints.maxWidth >= Breakpoints.sidebar;
+            final bool canCreate = _section == HomeSection.notes &&
+                controller.view != NotebookView.trash &&
+                !controller.selectionMode;
+
+            final Widget sidebar = NotebookSidebar(
+              section: _section,
+              onSection: (HomeSection s) => setState(() => _section = s),
+              onNewNote: _newNote,
+              inDrawer: !wide,
+            );
+
+            if (wide) {
+              return Scaffold(
+                body: Row(
+                  children: <Widget>[
+                    SizedBox(width: 284, child: sidebar),
+                    const VerticalDivider(width: 1),
+                    Expanded(child: SafeArea(left: false, child: _content(false))),
+                  ],
+                ),
+              );
+            }
+
+            return PopScope(
+              canPop: !controller.selectionMode,
+              onPopInvokedWithResult: (bool didPop, Object? result) {
+                if (!didPop && controller.selectionMode) {
+                  controller.clearSelection();
+                }
+              },
+              child: Scaffold(
+                drawer: Drawer(width: 300, child: sidebar),
+                body: SafeArea(bottom: false, child: _content(true)),
+                floatingActionButton: canCreate
+                    ? FloatingActionButton.extended(
+                        onPressed: _newNote,
+                        icon: const Icon(Icons.edit_outlined),
+                        label: const Text('New note'),
+                      )
+                    : null,
+              ),
+            );
+          },
+        ),
+      ),
     );
   }
 }
 
-class _NavItem {
-  const _NavItem(this.icon, this.selectedIcon, this.label);
+/// Shown after opening a password-reset link (web): choose a new password.
+class _NewPasswordDialog extends StatefulWidget {
+  const _NewPasswordDialog();
 
-  final IconData icon;
-  final IconData selectedIcon;
-  final String label;
+  @override
+  State<_NewPasswordDialog> createState() => _NewPasswordDialogState();
+}
+
+class _NewPasswordDialogState extends State<_NewPasswordDialog> {
+  final TextEditingController _password = TextEditingController();
+  final TextEditingController _confirm = TextEditingController();
+  bool _obscure = true;
+  String? _problem;
+
+  @override
+  void dispose() {
+    _password.dispose();
+    _confirm.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final NotebookController controller = context.read<NotebookController>();
+    if (_password.text.length < 6) {
+      setState(() => _problem = 'Use at least 6 characters.');
+      return;
+    }
+    if (_password.text != _confirm.text) {
+      setState(() => _problem = "The passwords don't match.");
+      return;
+    }
+    final bool ok = await controller.completePasswordRecovery(_password.text);
+    if (!mounted) {
+      return;
+    }
+    if (ok) {
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Password updated. Use it to sign in on your other devices.'),
+        ),
+      );
+    } else {
+      setState(() => _problem = controller.error);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final NotebookController controller = context.watch<NotebookController>();
+    return AlertDialog(
+      icon: const Icon(Icons.lock_reset),
+      title: const Text('Choose a new password'),
+      content: SizedBox(
+        width: 380,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            TextField(
+              controller: _password,
+              obscureText: _obscure,
+              autofocus: true,
+              decoration: InputDecoration(
+                labelText: 'New password',
+                suffixIcon: IconButton(
+                  tooltip: _obscure ? 'Show password' : 'Hide password',
+                  onPressed: () => setState(() => _obscure = !_obscure),
+                  icon: Icon(_obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _confirm,
+              obscureText: _obscure,
+              decoration: const InputDecoration(labelText: 'Repeat password'),
+              onSubmitted: (_) => _save(),
+            ),
+            if (_problem != null) ...<Widget>[
+              const SizedBox(height: 12),
+              Text(
+                _problem!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: controller.isBusy
+              ? null
+              : () {
+                  controller.dismissPasswordRecovery();
+                  Navigator.of(context).pop();
+                },
+          child: const Text('Later'),
+        ),
+        FilledButton(
+          onPressed: controller.isBusy ? null : _save,
+          child: const Text('Save password'),
+        ),
+      ],
+    );
+  }
 }

@@ -13,6 +13,9 @@
 class AppConfig {
   const AppConfig._();
 
+  static const String appName = 'Universal Notebook';
+  static const String appVersion = '0.3.0';
+
   static const String supabaseUrl =
       String.fromEnvironment('SUPABASE_URL', defaultValue: '');
   static const String supabaseAnonKey =
@@ -20,6 +23,13 @@ class AppConfig {
 
   static const String anthropicApiKey =
       String.fromEnvironment('ANTHROPIC_API_KEY', defaultValue: '');
+
+  /// Public web build. Password-reset emails link here, because a web page can
+  /// be opened from any device (a phone's mail app cannot open the APK).
+  static const String webAppUrl = String.fromEnvironment(
+    'WEB_APP_URL',
+    defaultValue: 'https://obey-afribit.github.io/obey-notebook/',
+  );
 
   /// True when cloud sync/auth can be enabled.
   static bool get hasSupabase =>

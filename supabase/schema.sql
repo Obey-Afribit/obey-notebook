@@ -73,6 +73,24 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
+-- Realtime: stream row changes so other signed-in devices pull within a second
+-- or two instead of waiting for the periodic check. RLS still applies to what
+-- each client receives. Safe to re-run.
+-- ---------------------------------------------------------------------------
+
+do $$
+begin
+  begin
+    alter publication supabase_realtime add table public.notes;
+  exception when duplicate_object then null;
+  end;
+  begin
+    alter publication supabase_realtime add table public.folders;
+  exception when duplicate_object then null;
+  end;
+end $$;
+
+-- ---------------------------------------------------------------------------
 -- Account deletion: lets a signed-in user delete their own auth account
 -- (and, via ON DELETE CASCADE above, all of their rows). Called by the app's
 -- "Delete account and data" action through AuthService.deleteCurrentAccount().

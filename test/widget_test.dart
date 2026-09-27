@@ -19,9 +19,11 @@ void main() {
         localOnly: true,
         revision: 3,
         isPinned: true,
+        colorId: 'sage',
       );
 
       final NoteItem restored = NoteItem.fromMap(note.toMap());
+      expect(restored.colorId, 'sage');
 
       expect(restored.id, note.id);
       expect(restored.ownerId, note.ownerId);

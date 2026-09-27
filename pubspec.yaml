@@ -1,13 +1,15 @@
 name: universal_notebook
 description: Offline-first universal notebook for Android, Windows, and the web.
 publish_to: "none"
-version: 0.2.0+1
+version: 0.3.0+2
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
 
 dependencies:
   flutter:
+    sdk: flutter
+  flutter_web_plugins:
     sdk: flutter
   cupertino_icons: ^1.0.8
 
@@ -30,7 +32,6 @@ dependencies:
 
   # Features
   share_plus: ^10.0.2
-  file_picker: ^8.1.0
   image_picker: ^1.1.2
   pdf: ^3.11.1
   flutter_local_notifications: ^17.2.3
@@ -38,6 +39,9 @@ dependencies:
   local_auth: ^2.3.0
   speech_to_text: ^7.0.0
   flutter_markdown_plus: ^1.0.12
+  flutter_staggered_grid_view: ^0.7.0
+  url_launcher: ^6.3.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -48,21 +52,23 @@ flutter:
   uses-material-design: true
   assets:
     - assets/templates/
+    - assets/icon/logo.png
 
-# App icon (secretary bird). Regenerate with:
+# App icon (secretary bird). The PNGs in assets/icon/ are generated from
+# assets/icon/source/secretary_bird.png by tool/make_icons.py, then:
 #   dart run flutter_launcher_icons
 flutter_launcher_icons:
   image_path: "assets/icon/icon.png"
   android: "ic_launcher"
   min_sdk_android: 21
-  adaptive_icon_background: "#262626"
+  adaptive_icon_background: "#343537"
   adaptive_icon_foreground: "assets/icon/icon_foreground.png"
   remove_alpha_ios: true
   web:
     generate: true
     image_path: "assets/icon/icon.png"
-    background_color: "#262626"
-    theme_color: "#17B3A6"
+    background_color: "#FCFAF7"
+    theme_color: "#262626"
   windows:
     generate: true
     image_path: "assets/icon/icon.png"

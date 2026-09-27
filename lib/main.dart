@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_web_plugins/url_strategy.dart';
 import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -8,7 +9,6 @@ import 'features/auth/auth_gate.dart';
 import 'services/ai_service.dart';
 import 'services/auth_service.dart';
 import 'services/local_store_service.dart';
-import 'services/ocr_service.dart';
 import 'services/privacy_lock_service.dart';
 import 'services/reminder_service.dart';
 import 'services/share_service.dart';
@@ -21,12 +21,23 @@ import 'state/notebook_controller.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Web: plain URLs instead of "#/". Supabase puts auth tokens in the URL
+  // fragment after a password-reset link, and hash routing would clash.
+  usePathUrlStrategy();
+
   if (AppConfig.hasSupabase) {
     try {
       await Supabase.initialize(
         url: AppConfig.supabaseUrl,
         // Accepts either an anon key or the newer publishable key.
         publishableKey: AppConfig.supabaseAnonKey,
+        authOptions: const FlutterAuthClientOptions(
+          // Implicit flow so an emailed link works on any device. PKCE would
+          // require opening the link on the same device that requested it,
+          // which fails when a reset requested in the Android app is opened
+          // from the phone's mail app (it launches the browser, not the APK).
+          authFlowType: AuthFlowType.implicit,
+        ),
       );
     } catch (_) {
       // If cloud init fails, the app continues in local-only mode.
@@ -45,17 +56,7 @@ class UniversalNotebookApp extends StatefulWidget {
 
 class _UniversalNotebookAppState extends State<UniversalNotebookApp> {
   late final LocalStoreService _localStoreService;
-  late final AuthService _authService;
-  late final SyncService _syncService;
-  late final TemplateService _templateService;
   late final ThemeController _themeController;
-  late final SpeechService _speechService;
-  late final OcrService _ocrService;
-  late final ReminderService _reminderService;
-  late final ShareService _shareService;
-  late final PrivacyLockService _privacyLockService;
-  late final AiService _aiService;
-  late final StorageService _storageService;
   late final NotebookController _notebookController;
 
   @override
@@ -63,34 +64,24 @@ class _UniversalNotebookAppState extends State<UniversalNotebookApp> {
     super.initState();
 
     _localStoreService = LocalStoreService();
-    _authService = AuthService();
-    _syncService = SyncService(
-      localStore: _localStoreService,
-      authService: _authService,
-    );
-    _templateService = TemplateService(localStore: _localStoreService);
+    final AuthService authService = AuthService();
     _themeController = ThemeController(localStore: _localStoreService);
-    _speechService = SpeechService();
-    _ocrService = OcrService();
-    _reminderService = ReminderService();
-    _shareService = ShareService();
-    _privacyLockService = PrivacyLockService();
-    _aiService = AiService();
-    _storageService = const StorageService();
 
     _notebookController = NotebookController(
-      authService: _authService,
+      authService: authService,
       localStoreService: _localStoreService,
-      syncService: _syncService,
-      templateService: _templateService,
+      syncService: SyncService(
+        localStore: _localStoreService,
+        authService: authService,
+      ),
+      templateService: TemplateService(localStore: _localStoreService),
       themeController: _themeController,
-      speechService: _speechService,
-      ocrService: _ocrService,
-      reminderService: _reminderService,
-      shareService: _shareService,
-      privacyLockService: _privacyLockService,
-      aiService: _aiService,
-      storageService: _storageService,
+      speechService: SpeechService(),
+      reminderService: ReminderService(),
+      shareService: ShareService(),
+      privacyLockService: PrivacyLockService(),
+      aiService: AiService(),
+      storageService: const StorageService(),
     );
 
     _notebookController.initialize();
@@ -115,7 +106,7 @@ class _UniversalNotebookAppState extends State<UniversalNotebookApp> {
       child: Consumer<ThemeController>(
         builder: (BuildContext context, ThemeController theme, _) {
           return MaterialApp(
-            title: 'Universal Notebook',
+            title: AppConfig.appName,
             debugShowCheckedModeBanner: false,
             theme: theme.lightTheme,
             darkTheme: theme.darkTheme,

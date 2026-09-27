@@ -1,27 +1,42 @@
 [
   {
     "id": "todo",
-    "title": "Todo List",
-    "body": "- [ ] Item 1\n- [ ] Item 2\n- [ ] Item 3"
+    "title": "To-do list",
+    "body": "## Today\n\n- [ ] \n- [ ] \n- [ ] \n\n## Later\n\n- [ ] "
+  },
+  {
+    "id": "meeting",
+    "title": "Meeting notes",
+    "body": "## Meeting\n\n**Date:** \n**Attendees:** \n\n## Agenda\n\n1. \n2. \n\n## Decisions\n\n- \n\n## Action items\n\n- [ ] Owner: task, due date"
+  },
+  {
+    "id": "daily",
+    "title": "Daily planner",
+    "body": "## Top 3 priorities\n\n1. \n2. \n3. \n\n## Schedule\n\n- 08:00 \n- 12:00 \n- 16:00 \n\n## Notes\n\n"
+  },
+  {
+    "id": "journal",
+    "title": "Journal",
+    "body": "## How I feel\n\n\n## What happened today\n\n\n## Grateful for\n\n- \n- \n\n## Tomorrow I will\n\n- [ ] "
   },
   {
     "id": "goals",
-    "title": "Goals",
-    "body": "Goal:\nWhy it matters:\nMilestones:\nDeadline:"
+    "title": "Goal plan",
+    "body": "## Goal\n\n\n## Why it matters\n\n\n## Milestones\n\n- [ ] \n- [ ] \n- [ ] \n\n**Deadline:** "
+  },
+  {
+    "id": "project",
+    "title": "Project brief",
+    "body": "## Overview\n\n\n## Objectives\n\n- \n\n## Scope\n\n**In:** \n**Out:** \n\n## Timeline\n\n| Phase | Date |\n| --- | --- |\n| Kick-off |  |\n| Delivery |  |\n\n## Risks\n\n- "
   },
   {
     "id": "recipe",
     "title": "Recipe",
-    "body": "Ingredients:\n1.\n2.\n\nSteps:\n1.\n2.\n\nNotes:"
+    "body": "## Ingredients\n\n- [ ] \n- [ ] \n\n## Steps\n\n1. \n2. \n\n## Notes\n\n"
   },
   {
     "id": "grocery",
-    "title": "Grocery List",
-    "body": "Produce:\n-\n\nProteins:\n-\n\nPantry:\n-"
-  },
-  {
-    "id": "tasks",
-    "title": "Task Plan",
-    "body": "Task:\nPriority:\nDue Date:\nStatus:\nNotes:"
+    "title": "Grocery list",
+    "body": "## Produce\n\n- [ ] \n\n## Protein\n\n- [ ] \n\n## Pantry\n\n- [ ] \n\n## Household\n\n- [ ] "
   }
 ]

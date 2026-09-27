@@ -1,12 +1,15 @@
 {
     "name": "Universal Notebook",
     "short_name": "Notebook",
-    "start_url": ".",
+    "id": "./",
+    "start_url": "./",
+    "scope": "./",
     "display": "standalone",
-    "background_color": "#262626",
-    "theme_color": "#17B3A6",
-    "description": "Offline-first notes with Markdown, folders, and cloud sync.",
-    "orientation": "portrait-primary",
+    "background_color": "#FCFAF7",
+    "theme_color": "#262626",
+    "description": "Notes, checklists and photos that sync across Android, Windows and the web.",
+    "orientation": "any",
+    "categories": ["productivity", "utilities"],
     "prefer_related_applications": false,
     "icons": [
         {

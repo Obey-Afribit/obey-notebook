@@ -22,7 +22,8 @@ class AuthService {
       _cloudReady = false;
       _client = null;
       _initializationError =
-          'Cloud sync is not configured. Notes are saved locally on this device.';
+          'Cloud sync is not configured in this build. Notes are saved on '
+          'this device only.';
       return;
     }
 
@@ -31,11 +32,11 @@ class AuthService {
       _client = Supabase.instance.client;
       _cloudReady = true;
       _initializationError = null;
-    } catch (error) {
+    } catch (_) {
       _cloudReady = false;
       _client = null;
       _initializationError =
-          'Cloud is unavailable. The app will keep working offline. ($error)';
+          'The cloud is unavailable right now. The app keeps working offline.';
     }
   }
 
@@ -49,9 +50,8 @@ class AuthService {
     if (user == null) {
       return false;
     }
-    // Verified once Supabase records an email confirmation timestamp. If email
-    // confirmation is disabled in the project, this is set immediately on
-    // sign-up so the gate passes transparently.
+    // Set once Supabase records a confirmation. With email confirmation turned
+    // off in the project, it is set immediately on sign-up.
     return user.emailConfirmedAt != null;
   }
 
@@ -60,35 +60,58 @@ class AuthService {
 
   String? get currentEmail => _client?.auth.currentUser?.email;
 
-  Stream<dynamic> authStateChanges() {
+  Stream<AuthState> authStateChanges() {
     final SupabaseClient? client = _client;
     if (client == null) {
-      return const Stream<dynamic>.empty();
+      return const Stream<AuthState>.empty();
     }
     return client.auth.onAuthStateChange;
   }
 
-  Future<void> createAccountWithEmail({
+  SupabaseClient _requireClient() {
+    final SupabaseClient? client = _client;
+    if (client == null) {
+      throw StateError('Cloud sign-in is unavailable in this build.');
+    }
+    return client;
+  }
+
+  /// Creates an account. Returns true when the user is signed in straight
+  /// away, false when the project requires email confirmation first.
+  Future<bool> createAccountWithEmail({
     required String email,
     required String password,
   }) async {
-    final SupabaseClient? client = _client;
-    if (client == null) {
-      throw Exception('Cloud auth unavailable. Configure Supabase to continue.');
-    }
-    await client.auth.signUp(email: email.trim(), password: password);
-    // Supabase dispatches the confirmation email automatically when enabled.
+    final AuthResponse response = await _requireClient().auth.signUp(
+          email: email.trim(),
+          password: password,
+          emailRedirectTo: AppConfig.webAppUrl,
+        );
+    return response.session != null;
   }
 
   Future<void> signInWithEmail({
     required String email,
     required String password,
   }) async {
-    final SupabaseClient? client = _client;
-    if (client == null) {
-      throw Exception('Cloud auth unavailable. Configure Supabase to continue.');
-    }
-    await client.auth.signInWithPassword(email: email.trim(), password: password);
+    await _requireClient()
+        .auth
+        .signInWithPassword(email: email.trim(), password: password);
+  }
+
+  /// Emails a reset link that opens the web app, which then asks for a new
+  /// password. The web app works from any device, including phones.
+  Future<void> sendPasswordReset(String email) async {
+    await _requireClient().auth.resetPasswordForEmail(
+          email.trim(),
+          redirectTo: AppConfig.webAppUrl,
+        );
+  }
+
+  Future<void> updatePassword(String newPassword) async {
+    await _requireClient()
+        .auth
+        .updateUser(UserAttributes(password: newPassword));
   }
 
   Future<void> signOut() async {
@@ -97,8 +120,7 @@ class AuthService {
 
   /// Deletes the signed-in account. Supabase does not allow a client to delete
   /// its own auth row directly, so this calls a `delete_current_user` RPC
-  /// (a SECURITY DEFINER function defined in the schema). Falls back to sign-out
-  /// if the RPC is unavailable.
+  /// (a SECURITY DEFINER function defined in the schema).
   Future<void> deleteCurrentAccount() async {
     final SupabaseClient? client = _client;
     if (client == null || client.auth.currentUser == null) {
@@ -117,7 +139,11 @@ class AuthService {
     if (client == null || email == null) {
       return;
     }
-    await client.auth.resend(type: OtpType.signup, email: email);
+    await client.auth.resend(
+      type: OtpType.signup,
+      email: email,
+      emailRedirectTo: AppConfig.webAppUrl,
+    );
   }
 
   Future<void> reloadUser() async {

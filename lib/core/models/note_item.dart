@@ -17,6 +17,7 @@ class NoteItem {
     this.deletedAt,
     this.reminderAt,
     this.conflictGroupId,
+    this.colorId,
   });
 
   final String id;
@@ -24,8 +25,8 @@ class NoteItem {
   final String folderId;
   final String title;
 
-  /// Note content as Markdown source. Rendered live in the editor's preview
-  /// and used directly for search, list previews, export, sharing, and AI.
+  /// Note content as Markdown source. Rendered in the editor's reading view
+  /// and used directly for search, card previews, export, sharing, and AI.
   final String body;
 
   final DateTime createdAt;
@@ -40,6 +41,20 @@ class NoteItem {
   final bool isDeleted;
   final DateTime? deletedAt;
   final String? conflictGroupId;
+
+  /// Key into [NoteColors]; null means the default surface.
+  final String? colorId;
+
+  /// Title shown in the UI. Older notes stored the literal "Untitled note".
+  String get displayTitle {
+    final String trimmed = title.trim();
+    if (trimmed.isEmpty || trimmed == 'Untitled note') {
+      return '';
+    }
+    return trimmed;
+  }
+
+  bool get isEmpty => displayTitle.isEmpty && body.trim().isEmpty;
 
   NoteItem copyWith({
     String? id,
@@ -61,6 +76,8 @@ class NoteItem {
     DateTime? deletedAt,
     bool clearDeletedAt = false,
     String? conflictGroupId,
+    String? colorId,
+    bool clearColor = false,
   }) {
     return NoteItem(
       id: id ?? this.id,
@@ -80,6 +97,7 @@ class NoteItem {
       isDeleted: isDeleted ?? this.isDeleted,
       deletedAt: clearDeletedAt ? null : (deletedAt ?? this.deletedAt),
       conflictGroupId: conflictGroupId ?? this.conflictGroupId,
+      colorId: clearColor ? null : (colorId ?? this.colorId),
     );
   }
 
@@ -102,6 +120,7 @@ class NoteItem {
       'isDeleted': isDeleted,
       'deletedAt': deletedAt?.toIso8601String(),
       'conflictGroupId': conflictGroupId,
+      'colorId': colorId,
     };
   }
 
@@ -132,6 +151,7 @@ class NoteItem {
           ? null
           : DateTime.parse(map['deletedAt'] as String),
       conflictGroupId: map['conflictGroupId'] as String?,
+      colorId: map['colorId'] as String?,
     );
   }
 }

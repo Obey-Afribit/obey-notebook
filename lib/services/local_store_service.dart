@@ -99,12 +99,44 @@ class LocalStoreService {
     await _box(templatesBoxName).put(template.id, template.toMap());
   }
 
-  bool getBuiltInTemplatesLoaded() {
-    return _box(settingsBoxName).get('built_in_templates_loaded') == true;
+  Future<void> deleteTemplate(String templateId) async {
+    await _box(templatesBoxName).delete(templateId);
   }
 
-  Future<void> markBuiltInTemplatesLoaded() async {
-    await _box(settingsBoxName).put('built_in_templates_loaded', true);
+  /// Ids of built-in templates currently stored (any owner).
+  List<String> readBuiltInTemplateIds() {
+    return _box(templatesBoxName)
+        .values
+        .whereType<Map>()
+        .map((Map<dynamic, dynamic> raw) => _toStringDynamicMap(raw))
+        .where((Map<String, dynamic> map) => map['isBuiltIn'] == true)
+        .map((Map<String, dynamic> map) => map['id'].toString())
+        .toList(growable: false);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Generic preferences
+  // ---------------------------------------------------------------------------
+
+  T? readSetting<T>(String key) {
+    final dynamic value = _box(settingsBoxName).get(key);
+    return value is T ? value : null;
+  }
+
+  Future<void> saveSetting(String key, Object? value) async {
+    await _box(settingsBoxName).put(key, value);
+  }
+
+  Set<String> readStringSet(String key) {
+    final dynamic value = _box(settingsBoxName).get(key);
+    if (value is! List) {
+      return <String>{};
+    }
+    return value.map((dynamic e) => e.toString()).toSet();
+  }
+
+  Future<void> saveStringSet(String key, Set<String> values) async {
+    await _box(settingsBoxName).put(key, values.toList(growable: false));
   }
 
   Future<void> enqueueMutation(SyncMutation mutation) async {
@@ -180,6 +212,16 @@ class LocalStoreService {
         .map((Map<dynamic, dynamic> item) => _toStringDynamicMap(item))
         .toList(growable: true);
 
+    // Autosave fires every second while typing. Keep one snapshot per burst of
+    // editing (a new one after 3 quiet minutes) instead of one per keystroke.
+    if (history.isNotEmpty) {
+      final DateTime? lastAt =
+          DateTime.tryParse(history.last['updatedAt']?.toString() ?? '');
+      if (lastAt != null &&
+          note.updatedAt.difference(lastAt).abs() < const Duration(minutes: 3)) {
+        history.removeLast();
+      }
+    }
     history.add(note.toMap());
     if (history.length > 40) {
       history.removeRange(0, history.length - 40);
